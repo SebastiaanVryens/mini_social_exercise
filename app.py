@@ -881,7 +881,7 @@ def user_risk_analysis(user_id):
         You will be able to check the scores by logging in with the administrator account:
             username: admin
             password: admin
-        Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
+        Then, navigate to the /admin endpoint. (http://localhost:8081/admin)
     """
     
     score = 0
@@ -904,7 +904,7 @@ def moderate_content(content):
     You will be able to check the scores by logging in with the administrator account:
             username: admin
             password: admin
-    Then, navigate to the /admin endpoint. (http://localhost:8080/admin)
+    Then, navigate to the /admin endpoint. (http://localhost:8081/admin)
     """
 
     moderated_content = content
@@ -939,5 +939,5 @@ def recommend(user_id, filter_following):
     return recommended_posts;
 
 if __name__ == '__main__':
-    app.run(debug=True, port=8080)
+    app.run(debug=True, port=8081)
 

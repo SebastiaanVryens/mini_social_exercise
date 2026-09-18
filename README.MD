@@ -12,9 +12,9 @@ The repository contains a ready database, you do not have to create your own dat
 2. Clone your forked repository onto your computer
 3. Make sure you have Python 3.11 installed
 4. Install dependencies by running `pip install -r requirements.txt`
-5. Start the server by running `pyhon ./app.py`
-6. The web application will be available at http://127.0.0.1:8080. 
-7. The admin interface is at http://127.0.0.1:8080/admin, available only to the Admin user (username: admin, pw: admin)
+5. Start the server by running `python ./app.py`
+6. The web application will be available at http://127.0.0.1:8081. 
+7. The admin interface is at http://127.0.0.1:8081/admin, available only to the Admin user (username: admin, pw: admin)
 8. Make sure your fork is public, and add its URL to your coursework assignments.
 
 ### Docker
