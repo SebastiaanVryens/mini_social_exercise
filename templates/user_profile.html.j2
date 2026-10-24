@@ -1,6 +1,7 @@
 {% extends "base.html.j2" %}
 {% block content %}
 {% from "macros/user_macros.html.j2" import user_display%}
+{% set is_own_profile = session.user_id == user.id %}
 
 <div class="container mt-5">
 
@@ -9,7 +10,13 @@
     <div class="row g-0 align-items-center">
       <div class="col-md-12">
         <div class="card-body">
-          <h2 class="card-title">{{ user_display(user.username) }}</h2>
+          <h2 class="card-title">
+            {{ user_display(user.username) }}
+            <!-- Reputation level, visible to everyone as a status symbol -->
+            <span class="badge rounded-pill text-bg-primary fs-6 align-middle" title="{{ reputation.points }} reputation points">
+              Level {{ reputation.level }} · {{ reputation.name }}
+            </span>
+          </h2>
           <p class="card-text text-muted mb-3">
             <strong>Location:</strong> {{ user.location or "N/A" }}<br>
             <strong>Birthdate:</strong> {{ user.birthdate or "N/A" }}<br>
@@ -49,6 +56,93 @@
     </div>
   </div>
 
+  <!-- Reputation progress and unlocked privileges, only on your own profile -->
+  {% if is_own_profile %}
+  <div class="card col-lg-8 mx-auto mt-4">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <h4 class="card-title mb-0">Your reputation</h4>
+        <span class="fs-5"><strong>{{ reputation.points }}</strong> points</span>
+      </div>
+      <p class="text-muted small mt-1">
+        You earn points when other members react to ({{ points_per_reaction }} point) or comment on
+        ({{ points_per_comment }} points) your posts. One member can give you at most {{ max_points_per_member }} points,
+        so your level shows how the whole community values your posts.
+      </p>
+
+      {% if reputation.next %}
+      <div class="progress mb-1" role="progressbar" aria-label="Progress to the next level" aria-valuenow="{{ reputation.progress }}" aria-valuemin="0" aria-valuemax="100" style="height: 10px;">
+        <div class="progress-bar" style="width: {{ reputation.progress }}%"></div>
+      </div>
+      <p class="small mb-3">
+        {{ reputation.points_to_next }} more points to reach <strong>Level {{ reputation.next.level }} · {{ reputation.next.name }}</strong>,
+        which unlocks: {{ reputation.next.privilege|lower }}.
+      </p>
+      {% else %}
+      <p class="small mb-3">You reached the highest level. All privileges are unlocked!</p>
+      {% endif %}
+
+      <ul class="list-unstyled mb-0">
+        {% for level in levels if level.privilege %}
+        <li class="mb-1">
+          {% if reputation.level >= level.level %}✅{% else %}🔒{% endif %}
+          <strong>Level {{ level.level }} · {{ level.name }}</strong> ({{ level.min_points }} points): {{ level.privilege }}
+        </li>
+        {% endfor %}
+      </ul>
+
+      <!-- Level 3 privilege: choose your own avatar colour -->
+      {% if reputation.level >= avatar_color_level %}
+      <hr>
+      <h5>Your avatar colour</h5>
+      <p class="small text-muted mb-2">
+        Everyone sees this colour next to your name. Preview: <span id="avatar-preview">{{ user_display(user.username) }}</span>
+      </p>
+      <form action="{{ url_for('set_avatar_color') }}" method="POST">
+        <div class="d-flex flex-wrap gap-2 mb-3">
+          {% for name, hex in avatar_colors.items() %}
+          <label class="avatar-swatch" title="{{ name }}">
+            <input type="radio" name="color" value="{{ hex }}" class="visually-hidden" {% if user.avatar_color == hex %}checked{% endif %} required>
+            <span class="swatch-circle" style="background-color: {{ hex }};"></span>
+            <span class="visually-hidden">{{ name }}</span>
+          </label>
+          {% endfor %}
+        </div>
+        <button type="submit" class="btn btn-primary btn-sm">Save colour</button>
+        {% if user.avatar_color %}
+        <button type="submit" name="reset" value="1" class="btn btn-light btn-sm" formnovalidate>Use automatic colour</button>
+        {% endif %}
+      </form>
+      {% endif %}
+    </div>
+  </div>
+  {% endif %}
+
+  <!-- Level 2 privilege: a post pinned to the top of the profile -->
+  {% if pinned_post %}
+  <h3 class="text-center border-bottom pb-2 my-5"><span>📌 Pinned Post</span></h3>
+
+  <div class="row g-3 justify-content-center">
+    <div class="col-md-8">
+      <div class="card shadow-sm border-primary">
+        <a href="{{ url_for('post_detail', post_id=pinned_post.id) }}" class="text-decoration-none text-reset">
+          <div class="card-body">
+            <p class="card-text">{{ pinned_post.content }}</p>
+            <small class="text-muted">Posted on {{ pinned_post.created_at|datetimeformat }}</small>
+          </div>
+        </a>
+        {% if is_own_profile %}
+        <div class="card-footer bg-transparent border-0 pt-0">
+          <form action="{{ url_for('unpin_post') }}" method="POST">
+            <button type="submit" class="btn btn-light btn-sm">Unpin</button>
+          </form>
+        </div>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+  {% endif %}
+
   <h3 class="text-center border-bottom pb-2 my-5"><span>Latest Posts</span></h3>
 
   <div class="row g-3">
@@ -61,6 +155,13 @@
             <small class="text-muted">Posted on {{ post.created_at|datetimeformat }}</small>
           </div>
         </a>
+        {% if is_own_profile and reputation.level >= pin_level %}
+        <div class="card-footer bg-transparent border-0 pt-0">
+          <form action="{{ url_for('pin_post', post_id=post.id) }}" method="POST">
+            <button type="submit" class="btn btn-light btn-sm">📌 Pin to top</button>
+          </form>
+        </div>
+        {% endif %}
       </div>
     </div>
     {% else %}
@@ -96,4 +197,13 @@
   </div>
 
 </div>
+
+<script>
+  // Live preview of the avatar colour before saving it
+  document.querySelectorAll(".avatar-swatch input").forEach((input) => {
+    input.addEventListener("change", () => {
+      document.querySelector("#avatar-preview a").style.color = input.value;
+    });
+  });
+</script>
 {% endblock %}

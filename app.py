@@ -262,6 +262,7 @@ def delete_post(post_id):
     db.execute('DELETE FROM comments WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM reactions WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM ask_requests WHERE post_id = ?', (post_id,))
+    db.execute('UPDATE users SET pinned_post_id = NULL WHERE pinned_post_id = ?', (post_id,))
     # Finally, delete the post itself
     db.execute('DELETE FROM posts WHERE id = ?', (post_id,))
     db.commit()
@@ -316,13 +317,30 @@ def user_profile(username):
             is_currently_following = True
     # --
 
-    return render_template('user_profile.html.j2', 
-                           user=user, 
-                           posts=posts, 
+    #  Reputation level and pinned post (Design Claim 23 feature)
+    reputation = get_level(user['id'])
+    pinned_post = None
+    if user.get('pinned_post_id'):
+        pinned_post = next((post for post in posts if post['id'] == user['pinned_post_id']), None)
+        # The pinned post is shown on top, so it doesn't need to appear again in the list
+        posts = [post for post in posts if post['id'] != user['pinned_post_id']]
+
+    return render_template('user_profile.html.j2',
+                           user=user,
+                           posts=posts,
                            comments=comments,
-                           followers_count=followers_count, 
+                           followers_count=followers_count,
                            following_count=following_count,
-                           is_following=is_currently_following)
+                           is_following=is_currently_following,
+                           reputation=reputation,
+                           pinned_post=pinned_post,
+                           levels=LEVELS,
+                           pin_level=PIN_LEVEL,
+                           avatar_color_level=AVATAR_COLOR_LEVEL,
+                           avatar_colors=AVATAR_COLORS,
+                           points_per_reaction=POINTS_PER_REACTION,
+                           points_per_comment=POINTS_PER_COMMENT,
+                           max_points_per_member=MAX_POINTS_PER_MEMBER)
     
 
 @app.route('/u/<username>/followers')
@@ -846,6 +864,7 @@ def admin_delete_post(post_id):
     db.execute('DELETE FROM comments WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM reactions WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM ask_requests WHERE post_id = ?', (post_id,))
+    db.execute('UPDATE users SET pinned_post_id = NULL WHERE pinned_post_id = ?', (post_id,))
     db.execute('DELETE FROM posts WHERE id = ?', (post_id,))
     db.commit()
     flash(f'Post {post_id} has been deleted.', 'success')
@@ -1160,8 +1179,183 @@ def decline_request(request_id):
 
     return redirect(request.referrer or url_for('requests_inbox'))
 
+# ----- Design Claim feature: Reputation levels (Chapter 2, Design Claim 23)
+# "Rewards--whether in the form of status, privileges, or material benefits--motivate contributions."
+# Members earn reputation points when others react to or comment on their posts, and higher
+# levels unlock privileges: Level 2 can pin a post to the top of their profile, Level 3 can
+# choose their own avatar colour, which everyone sees next to their name on every post and comment.
+# Points depend on how others respond, not on how much you post (performance-contingent), and one
+# member can only give you a limited number of points. Both make the system harder to game
+# (Design Claims 25-27).
+
+POINTS_PER_REACTION = 1
+POINTS_PER_COMMENT = 2
+# A single member (e.g. a friend) can't push someone up the levels on their own
+MAX_POINTS_PER_MEMBER = 10
+# TEMPORARY, for testing and screenshots: extra points for every member. Set back to 0 before submitting.
+TEST_BONUS_POINTS = 30
+
+LEVELS = [
+    {'level': 1, 'name': 'Newcomer', 'min_points': 0, 'privilege': None},
+    {'level': 2, 'name': 'Contributor', 'min_points': 25, 'privilege': 'Pin a post to the top of your profile'},
+    {'level': 3, 'name': 'Valued member', 'min_points': 100, 'privilege': 'Choose your own avatar colour'},
+]
+PIN_LEVEL = 2
+AVATAR_COLOR_LEVEL = 3
+
+# A fixed palette instead of a free colour picker, so every name stays readable on the light background
+AVATAR_COLORS = {
+    'Red': '#c62828', 'Coral': '#e4572e', 'Orange': '#d97706', 'Gold': '#b08900',
+    'Green': '#2e7d32', 'Teal': '#00897b', 'Blue': '#1d4ed8', 'Ocean': '#0277bd',
+    'Purple': '#6a1b9a', 'Magenta': '#ad1457', 'Brown': '#6d4c41', 'Slate': '#455a64',
+}
+
+
+def init_reputation_columns():
+    """Adds the columns for the Level 2 and Level 3 privileges to the users table, if missing."""
+    db = sqlite3.connect(DATABASE)
+    columns = {row[1] for row in db.execute('PRAGMA table_info(users)')}
+    if 'pinned_post_id' not in columns:
+        db.execute('ALTER TABLE users ADD COLUMN pinned_post_id INTEGER DEFAULT NULL')
+    if 'avatar_color' not in columns:
+        db.execute('ALTER TABLE users ADD COLUMN avatar_color TEXT DEFAULT NULL')
+    db.commit()
+    db.close()
+
+init_reputation_columns()
+
+
+def get_reputation(user_id):
+    """
+    Returns a member's reputation points: points for every reaction and comment that other
+    members left on their posts, counting at most MAX_POINTS_PER_MEMBER from any single member.
+    Reactions and comments on your own posts don't count.
+    """
+    row = query_db('''
+        SELECT IFNULL(SUM(MIN(points, ?)), 0) AS total FROM (
+            SELECT giver_id, SUM(points) AS points FROM (
+                SELECT r.user_id AS giver_id, ? AS points
+                FROM reactions r JOIN posts p ON p.id = r.post_id
+                WHERE p.user_id = ? AND r.user_id != ?
+                UNION ALL
+                SELECT c.user_id AS giver_id, ? AS points
+                FROM comments c JOIN posts p ON p.id = c.post_id
+                WHERE p.user_id = ? AND c.user_id != ?
+            )
+            GROUP BY giver_id
+        )
+    ''', (MAX_POINTS_PER_MEMBER, POINTS_PER_REACTION, user_id, user_id,
+          POINTS_PER_COMMENT, user_id, user_id), one=True)
+    return (row['total'] if row else 0) + TEST_BONUS_POINTS
+
+
+def get_level(user_id):
+    """Returns a member's points, current level and progress towards the next level."""
+    points = get_reputation(user_id)
+    current = [level for level in LEVELS if points >= level['min_points']][-1]
+    next_level = next((level for level in LEVELS if level['min_points'] > points), None)
+
+    progress = 100
+    if next_level:
+        span = next_level['min_points'] - current['min_points']
+        progress = int((points - current['min_points']) / span * 100)
+
+    return {
+        'points': points,
+        'level': current['level'],
+        'name': current['name'],
+        'next': next_level,
+        'points_to_next': next_level['min_points'] - points if next_level else 0,
+        'progress': progress,
+    }
+
+
+def get_custom_avatar_colors():
+    """Returns {username: colour} for members who chose their own avatar colour, loaded once per request."""
+    if 'avatar_colors' not in g:
+        rows = query_db('SELECT username, avatar_color FROM users WHERE avatar_color IS NOT NULL') or []
+        g.avatar_colors = {row['username']: row['avatar_color'] for row in rows}
+    return g.avatar_colors
+
+
+@app.route('/posts/<int:post_id>/pin', methods=['POST'])
+def pin_post(post_id):
+    """Level 2 privilege: pins one of the current user's posts to the top of their profile."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to pin a post.', 'danger')
+        return redirect(url_for('login'))
+
+    post = query_db('SELECT id, user_id FROM posts WHERE id = ?', (post_id,), one=True)
+    if not post or post['user_id'] != user_id:
+        flash('You can only pin your own posts.', 'danger')
+    elif get_level(user_id)['level'] < PIN_LEVEL:
+        flash(f'Reach Level {PIN_LEVEL} to unlock pinning posts.', 'warning')
+    else:
+        db = get_db()
+        db.execute('UPDATE users SET pinned_post_id = ? WHERE id = ?', (post_id, user_id))
+        db.commit()
+        flash('Post pinned to the top of your profile.', 'success')
+
+    return redirect(url_for('user_profile', username=session.get('username')))
+
+
+@app.route('/profile/unpin', methods=['POST'])
+def unpin_post():
+    """Removes the pinned post from the current user's profile."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to unpin a post.', 'danger')
+        return redirect(url_for('login'))
+
+    db = get_db()
+    db.execute('UPDATE users SET pinned_post_id = NULL WHERE id = ?', (user_id,))
+    db.commit()
+    flash('Post unpinned.', 'info')
+    return redirect(url_for('user_profile', username=session.get('username')))
+
+
+@app.route('/profile/avatar-color', methods=['POST'])
+def set_avatar_color():
+    """Level 3 privilege: lets the current user choose their own avatar colour from the palette."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to change your avatar colour.', 'danger')
+        return redirect(url_for('login'))
+
+    color = request.form.get('color')
+    db = get_db()
+
+    if request.form.get('reset'):
+        # Going back to the automatic colour is always allowed
+        db.execute('UPDATE users SET avatar_color = NULL WHERE id = ?', (user_id,))
+        db.commit()
+        flash('Your avatar uses the automatic colour again.', 'info')
+    elif get_level(user_id)['level'] < AVATAR_COLOR_LEVEL:
+        flash(f'Reach Level {AVATAR_COLOR_LEVEL} to unlock choosing your avatar colour.', 'warning')
+    elif color not in AVATAR_COLORS.values():
+        flash('Please pick one of the colours.', 'warning')
+    else:
+        db.execute('UPDATE users SET avatar_color = ? WHERE id = ?', (color, user_id))
+        db.commit()
+        flash('Your new avatar colour is saved. Everyone will see it next to your name.', 'success')
+
+    return redirect(url_for('user_profile', username=session.get('username')))
+
+
 @app.template_global()
 def loop_color(user_id):
+    # Level 3 members can choose their own colour (see the reputation feature above)
+    custom_color = get_custom_avatar_colors().get(user_id)
+    if custom_color:
+        return custom_color
+
     # Generate a pastel color based on user_id hash
     h = hashlib.md5(str(user_id).encode()).hexdigest()
     r = int(h[0:2], 16)

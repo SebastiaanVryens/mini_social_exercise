@@ -16,4 +16,24 @@ footer {
   text-align: center;
 }
 
+/* Avatar colour palette (reputation Level 3 privilege) */
+.avatar-swatch .swatch-circle {
+  display: inline-block;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  border: 3px solid transparent;
+  cursor: pointer;
+}
+
+.avatar-swatch input:checked + .swatch-circle {
+  border-color: #212529;
+  box-shadow: inset 0 0 0 2px #fff;
+}
+
+.avatar-swatch input:focus-visible + .swatch-circle {
+  outline: 2px solid #0d6efd;
+  outline-offset: 2px;
+}
+
 
