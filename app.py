@@ -5,6 +5,7 @@ import collections
 import json
 import sqlite3
 import hashlib
+import math
 import re
 from datetime import datetime
 
@@ -260,6 +261,7 @@ def delete_post(post_id):
     # To maintain database integrity, delete associated records first
     db.execute('DELETE FROM comments WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM reactions WHERE post_id = ?', (post_id,))
+    db.execute('DELETE FROM ask_requests WHERE post_id = ?', (post_id,))
     # Finally, delete the post itself
     db.execute('DELETE FROM posts WHERE id = ?', (post_id,))
     db.commit()
@@ -397,7 +399,8 @@ def post_detail(post_id):
                            reactions=reactions,
                            comments=comments,
                            reaction_emojis=REACTION_EMOJIS,
-                           reaction_types=REACTION_TYPES)
+                           reaction_types=REACTION_TYPES,
+                           **get_ask_context(post, session.get('user_id')))
 
 @app.route('/about')
 def about():
@@ -497,8 +500,16 @@ def add_comment(post_id):
         db = get_db()
         db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
                    (post_id, user_id, content))
+        # If the author personally asked this member to answer, the request is now answered
+        answered = db.execute('''
+            UPDATE ask_requests SET status = 'answered', responded_at = CURRENT_TIMESTAMP
+            WHERE post_id = ? AND recipient_id = ? AND status != 'answered'
+        ''', (post_id, user_id)).rowcount
         db.commit()
-        flash('Your comment was added.', 'success')
+        if answered:
+            flash('Thanks for answering! The member who asked you will see your reply.', 'success')
+        else:
+            flash('Your comment was added.', 'success')
     else:
         flash('Comment cannot be empty.', 'warning')
 
@@ -834,6 +845,7 @@ def admin_delete_post(post_id):
     db = get_db()
     db.execute('DELETE FROM comments WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM reactions WHERE post_id = ?', (post_id,))
+    db.execute('DELETE FROM ask_requests WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM posts WHERE id = ?', (post_id,))
     db.commit()
     flash(f'Post {post_id} has been deleted.', 'success')
@@ -855,6 +867,298 @@ def admin_delete_comment(comment_id):
 @app.route('/rules')
 def rules():
     return render_template('rules.html.j2')
+
+
+# ----- Design Claim feature: "Ask someone" (Chapter 2, Design Claim 4)
+# "Compared to broadcasting requirements for contribution to all community members,
+# asking specific people to make contributions increases the likelihood that they will do so."
+# Post authors can ask specific members to answer their post. The asked member gets a
+# personal request that they can answer (by commenting) or decline. Suggestions of whom
+# to ask are based on who has written about the same topics (Design Claim 3).
+
+# Asking everyone would turn the request back into a broadcast, so the number is capped
+MAX_ASKS_PER_POST = 3
+SUGGESTION_COUNT = 5
+# Hashtags say what a post is about more clearly than ordinary words, so they count double
+HASHTAG_WEIGHT = 2
+
+STOPWORDS = {
+    'all', 'and', 'any', 'are', 'big', 'but', 'can', 'day', 'did', 'dont', 'end', 'far',
+    'few', 'for', 'get', 'got', 'had', 'has', 'her', 'him', 'his', 'how', 'its', 'ive',
+    'let', 'lot', 'man', 'may', 'new', 'not', 'now', 'off', 'old', 'one', 'our', 'out',
+    'own', 'put', 'say', 'see', 'she', 'the', 'too', 'top', 'try', 'two', 'use', 'was',
+    'way', 'who', 'why', 'yes', 'yet', 'you',
+    'about', 'above', 'after', 'again', 'against', 'also', 'always', 'anyone', 'anything',
+    'back', 'because', 'been', 'before', 'being', 'below', 'between', 'both', 'cannot',
+    'could', 'does', 'doing', 'down', 'during', 'each', 'even', 'ever', 'every', 'everyone',
+    'first', 'from', 'further', 'going', 'good', 'great', 'have', 'having', 'here', 'hers',
+    'herself', 'himself', 'into', 'itself', 'just', 'know', 'last', 'like', 'made', 'make',
+    'maybe', 'more', 'most', 'much', 'myself', 'need', 'never', 'only', 'other', 'ours',
+    'over', 'people', 'really', 'same', 'should', 'some', 'someone', 'something', 'still',
+    'such', 'than', 'that', 'their', 'theirs', 'them', 'themselves', 'then', 'there',
+    'these', 'they', 'thing', 'things', 'think', 'this', 'those', 'through', 'time',
+    'today', 'very', 'want', 'well', 'were', 'what', 'when', 'where', 'which', 'while',
+    'will', 'with', 'would', 'year', 'your', 'yours', 'yourself',
+}
+
+
+def init_ask_requests_table():
+    """Creates the table that stores 'Ask someone' requests, if it does not exist yet."""
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS ask_requests (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            post_id      INTEGER NOT NULL,
+            requester_id INTEGER NOT NULL,
+            recipient_id INTEGER NOT NULL,
+            status       TEXT    NOT NULL DEFAULT 'pending', -- pending, answered or declined
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            responded_at TIMESTAMP
+        )
+    ''')
+    db.commit()
+    db.close()
+
+init_ask_requests_table()
+
+
+def extract_keywords(text):
+    """
+    Returns the set of meaningful lowercase terms in a text: its hashtags (kept with
+    their '#', e.g. '#diylife') and its other words of 3+ letters (e.g. 'diy', 'drill').
+    """
+    text = (text or '').lower()
+    hashtags = {'#' + tag for tag in re.findall(r"#(\w+)", text)}
+    words = re.findall(r"[a-z]+", re.sub(r"#\w+", ' ', text))
+    return hashtags | {word for word in words if len(word) >= 3 and word not in STOPWORDS}
+
+
+def shared_topics(post_terms, text_terms):
+    """
+    Returns the post's terms that also appear in another text. A hashtag also matches
+    the same plain word ('#diy' and 'diy') and longer or shorter tags ('#diy' and '#diylife').
+    """
+    shared = post_terms & text_terms
+    for term in post_terms - shared:
+        if not term.startswith('#'):
+            continue
+        if term[1:] in text_terms:
+            shared.add(term)
+        elif any(other.startswith('#') and min(len(term), len(other)) > 3
+                 and (other.startswith(term) or term.startswith(other))
+                 for other in text_terms):
+            shared.add(term)
+    return shared
+
+
+def suggest_people_to_ask(post, exclude_ids):
+    """
+    Suggests members who have written about the same topics as the post, i.e. people who
+    are likely interested in it and able to answer (Design Claim 3).
+
+    Each shared term is weighted by how rare it is on the platform, so a specific word
+    like 'drill' counts for more than a common word like 'weekend'. Hashtags count double.
+
+    Returns a list of dicts with the user_id, username and matching topics of each member.
+    """
+    keywords = extract_keywords(post['content'])
+    if not keywords:
+        return []
+
+    texts = query_db('''
+        SELECT user_id, content FROM posts WHERE id != ?
+        UNION ALL
+        SELECT user_id, content FROM comments
+    ''', (post['id'],))
+
+    doc_freq = collections.Counter()
+    user_matches = collections.defaultdict(collections.Counter)
+    for row in texts:
+        for word in shared_topics(keywords, extract_keywords(row['content'])):
+            doc_freq[word] += 1
+            if row['user_id'] not in exclude_ids:
+                user_matches[row['user_id']][word] += 1
+
+    scores = {}
+    for user_id, matches in user_matches.items():
+        # Each term counts for at most 5 texts, so very active members don't win on volume alone
+        scores[user_id] = sum(math.log(len(texts) / doc_freq[word]) * min(count, 5)
+                              * (HASHTAG_WEIGHT if word.startswith('#') else 1)
+                              for word, count in matches.items())
+
+    suggestions = []
+    for user_id in sorted(scores, key=scores.get, reverse=True)[:SUGGESTION_COUNT]:
+        user = query_db('SELECT username FROM users WHERE id = ?', (user_id,), one=True)
+        if user:
+            # Show the rarest shared words first, they explain the suggestion best
+            topics = sorted(user_matches[user_id], key=lambda word: doc_freq[word])[:3]
+            suggestions.append({'user_id': user_id, 'username': user['username'], 'topics': topics})
+    return suggestions
+
+
+def get_ask_context(post, current_user_id):
+    """Collects the 'Ask someone' data that the post detail page needs."""
+    context = {
+        'my_ask_request': None,
+        'sent_asks': [],
+        'ask_suggestions': [],
+        'ask_usernames': [],
+        'max_asks': MAX_ASKS_PER_POST,
+    }
+    if not current_user_id:
+        return context
+
+    if current_user_id == post['user_id']:
+        # The author sees who they already asked, and suggestions of whom to ask next
+        context['sent_asks'] = query_db('''
+            SELECT ar.status, u.id AS user_id, u.username
+            FROM ask_requests ar
+            JOIN users u ON u.id = ar.recipient_id
+            WHERE ar.post_id = ?
+            ORDER BY ar.created_at
+        ''', (post['id'],))
+
+        if len(context['sent_asks']) < MAX_ASKS_PER_POST:
+            commenters = query_db('SELECT DISTINCT user_id FROM comments WHERE post_id = ?', (post['id'],))
+            # No point suggesting the author, people already asked, or people who already answered
+            exclude_ids = ({current_user_id}
+                           | {ask['user_id'] for ask in context['sent_asks']}
+                           | {row['user_id'] for row in commenters})
+            context['ask_suggestions'] = suggest_people_to_ask(post, exclude_ids)
+            usernames = query_db('SELECT username FROM users WHERE id != ? ORDER BY username', (current_user_id,))
+            context['ask_usernames'] = [row['username'] for row in usernames]
+    else:
+        # Anyone else sees the request if this post's author asked them personally
+        context['my_ask_request'] = query_db('''
+            SELECT ar.id, u.username AS requester
+            FROM ask_requests ar
+            JOIN users u ON u.id = ar.requester_id
+            WHERE ar.post_id = ? AND ar.recipient_id = ? AND ar.status = 'pending'
+        ''', (post['id'], current_user_id), one=True)
+
+    return context
+
+
+@app.context_processor
+def inject_pending_requests_count():
+    """Makes the number of open requests for the logged-in user available in every template (navbar badge)."""
+    user_id = session.get('user_id')
+    if not user_id:
+        return {}
+    row = query_db("SELECT COUNT(*) AS cnt FROM ask_requests WHERE recipient_id = ? AND status = 'pending'",
+                   (user_id,), one=True)
+    return {'pending_requests_count': row['cnt'] if row else 0}
+
+
+@app.route('/posts/<int:post_id>/ask', methods=['POST'])
+def ask_someone(post_id):
+    """Sends a personal request to a specific member to answer the current user's post."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to ask someone.', 'danger')
+        return redirect(url_for('login'))
+
+    # Only the author of a post can ask people to answer it
+    post = query_db('SELECT id, user_id FROM posts WHERE id = ?', (post_id,), one=True)
+    if not post or post['user_id'] != user_id:
+        flash('You can only ask people to answer your own posts.', 'danger')
+        return redirect(url_for('feed'))
+
+    username = (request.form.get('username') or '').strip().lstrip('@')
+    recipient = query_db('SELECT id, username FROM users WHERE username = ?', (username,), one=True)
+    asked_count = query_db('SELECT COUNT(*) AS cnt FROM ask_requests WHERE post_id = ?', (post_id,), one=True)['cnt']
+
+    if not recipient:
+        flash(f'No member called "{username}" was found.', 'warning')
+    elif recipient['id'] == user_id:
+        flash('You cannot ask yourself.', 'warning')
+    elif query_db('SELECT 1 FROM ask_requests WHERE post_id = ? AND recipient_id = ?',
+                  (post_id, recipient['id']), one=True):
+        flash(f"You already asked @{recipient['username']} about this post.", 'info')
+    elif asked_count >= MAX_ASKS_PER_POST:
+        flash(f'You can ask at most {MAX_ASKS_PER_POST} people per post.', 'warning')
+    else:
+        db = get_db()
+        db.execute('INSERT INTO ask_requests (post_id, requester_id, recipient_id) VALUES (?, ?, ?)',
+                   (post_id, user_id, recipient['id']))
+        db.commit()
+        flash(f"You asked @{recipient['username']} to answer your post.", 'success')
+
+    return redirect(url_for('post_detail', post_id=post_id))
+
+
+@app.route('/requests')
+def requests_inbox():
+    """Shows the requests other members sent to the current user, and the requests they sent."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to see your requests.', 'danger')
+        return redirect(url_for('login'))
+
+    # Open requests first, then the most recent ones
+    received_raw = query_db('''
+        SELECT ar.id, ar.post_id, ar.status, ar.created_at, u.username AS requester, p.content
+        FROM ask_requests ar
+        JOIN users u ON u.id = ar.requester_id
+        JOIN posts p ON p.id = ar.post_id
+        WHERE ar.recipient_id = ?
+        ORDER BY ar.status = 'pending' DESC, ar.created_at DESC
+        LIMIT 50
+    ''', (user_id,))
+
+    sent_raw = query_db('''
+        SELECT ar.id, ar.post_id, ar.status, ar.created_at, u.username AS recipient, p.content
+        FROM ask_requests ar
+        JOIN users u ON u.id = ar.recipient_id
+        JOIN posts p ON p.id = ar.post_id
+        WHERE ar.requester_id = ?
+        ORDER BY ar.created_at DESC
+        LIMIT 50
+    ''', (user_id,))
+
+    received = []
+    for row in received_raw:
+        item = dict(row)
+        item['content'], _ = moderate_content(item['content'])
+        received.append(item)
+
+    sent = []
+    for row in sent_raw:
+        item = dict(row)
+        item['content'], _ = moderate_content(item['content'])
+        sent.append(item)
+
+    return render_template('requests.html.j2', received=received, sent=sent)
+
+
+@app.route('/requests/<int:request_id>/decline', methods=['POST'])
+def decline_request(request_id):
+    """Lets the asked member decline a request, so the author knows to ask someone else."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to decline a request.', 'danger')
+        return redirect(url_for('login'))
+
+    # Only the asked member can decline, and only while the request is still open
+    db = get_db()
+    cur = db.execute('''
+        UPDATE ask_requests SET status = 'declined', responded_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND recipient_id = ? AND status = 'pending'
+    ''', (request_id, user_id))
+    db.commit()
+
+    if cur.rowcount > 0:
+        flash('Request declined. The member who asked you can now ask someone else.', 'info')
+    else:
+        flash('Request not found.', 'warning')
+
+    return redirect(request.referrer or url_for('requests_inbox'))
 
 @app.template_global()
 def loop_color(user_id):

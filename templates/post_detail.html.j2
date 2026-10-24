@@ -3,6 +3,19 @@
 {% from "macros/user_macros.html.j2" import user_display %}
 
 <div class="col-md-8 mx-auto pt-4">
+  <!-- Shown when the author of this post personally asked the current user to answer it -->
+  {% if my_ask_request %}
+  <div class="alert alert-info d-flex justify-content-between align-items-center">
+    <span>{{ user_display(my_ask_request.requester) }} asked <strong>you</strong> personally to answer this post.</span>
+    <div class="d-flex">
+      <button class="btn btn-primary btn-sm me-2" data-bs-toggle="modal" data-bs-target="#addCommentModal-{{ post.id }}">Answer</button>
+      <form action="{{ url_for('decline_request', request_id=my_ask_request.id) }}" method="POST">
+        <button type="submit" class="btn btn-light btn-sm">Decline</button>
+      </form>
+    </div>
+  </div>
+  {% endif %}
+
   <div class="card shadow-sm">
     <div class="card-body">
       <div class="d-flex justify-content-between align-items-center">
@@ -63,6 +76,21 @@
         {% endif %}
       </div>
 
+      <!-- The author sees who they asked to answer this post, and whether those people answered -->
+      {% if sent_asks %}
+      {% set status_badges = {
+        'pending': ('waiting', 'text-bg-secondary'),
+        'answered': ('answered', 'text-bg-success'),
+        'declined': ('declined', 'text-bg-danger')
+      } %}
+      <div class="small mb-2">
+        <span class="text-muted me-1">You asked:</span>
+        {% for ask in sent_asks %}
+          <span class="me-2">{{ user_display(ask.username) }} <span class="badge {{ status_badges[ask.status][1] }}">{{ status_badges[ask.status][0] }}</span></span>
+        {% endfor %}
+      </div>
+      {% endif %}
+
       <hr>
 
       <!-- Comments Section -->
@@ -72,8 +100,14 @@
           {% else %}
             <h4 class="mb-0">Comments</h4>
           {% endif %}
-          <!-- Add Comment Button (triggers modal) -->
-          <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addCommentModal-{{ post.id }}">Add Comment</button>
+          <div class="d-flex">
+            <!-- Ask Someone Button (only for the author, triggers modal) -->
+            {% if session.get('user_id') == post.user_id %}
+            <button class="btn btn-light btn-sm me-2" data-bs-toggle="modal" data-bs-target="#askModal">Ask someone</button>
+            {% endif %}
+            <!-- Add Comment Button (triggers modal) -->
+            <button class="btn btn-primary btn-sm" data-bs-toggle="modal" data-bs-target="#addCommentModal-{{ post.id }}">Add Comment</button>
+          </div>
       </div>
 
       {% if comments %}
@@ -120,5 +154,65 @@
     </div>
   </div>
 </div>
+
+<!-- "Ask someone" modal: the author picks specific members to ask for an answer -->
+{% if session.get('user_id') == post.user_id %}
+<div class="modal fade" id="askModal" tabindex="-1" aria-labelledby="askModalLabel" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="askModalLabel">Ask someone to answer</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="text-muted small">
+          A question asked to one specific person gets answered more often than a question to everyone.
+          You can ask up to {{ max_asks }} people per post.
+        </p>
+
+        {% if sent_asks|length >= max_asks %}
+          <p class="mb-0">You have already asked {{ max_asks }} people about this post.</p>
+        {% else %}
+          <h6>Suggested for this post</h6>
+          {% for suggestion in ask_suggestions %}
+          <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+              {{ user_display(suggestion.username) }}
+              <div class="small text-muted">Has written about: {{ suggestion.topics|join(', ') }}</div>
+            </div>
+            <form action="{{ url_for('ask_someone', post_id=post.id) }}" method="POST">
+              <input type="hidden" name="username" value="{{ suggestion.username }}">
+              <button type="submit" class="btn btn-primary btn-sm">Ask</button>
+            </form>
+          </div>
+          {% else %}
+          <p class="small text-muted">No suggestions for this post. You can still ask a member by username below.</p>
+          {% endfor %}
+
+          <h6 class="mt-4">Or ask a member by username</h6>
+          <form action="{{ url_for('ask_someone', post_id=post.id) }}" method="POST" class="d-flex">
+            <input class="form-control me-2" name="username" list="ask-usernames" placeholder="username" required>
+            <datalist id="ask-usernames">
+              {% for name in ask_usernames %}<option value="{{ name }}">{% endfor %}
+            </datalist>
+            <button type="submit" class="btn btn-primary">Ask</button>
+          </form>
+        {% endif %}
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<script>
+  // Open the right modal when arriving from an "Ask someone" (#ask) or "Answer" (#answer) link
+  document.addEventListener("DOMContentLoaded", () => {
+    const modalIds = { "#ask": "askModal", "#answer": "addCommentModal-{{ post.id }}" };
+    const modal = document.getElementById(modalIds[window.location.hash]);
+    if (modal) {
+      bootstrap.Modal.getOrCreateInstance(modal).show();
+    }
+  });
+</script>
 
 {% endblock %}

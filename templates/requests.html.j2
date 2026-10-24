@@ -1,0 +1,66 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{% from "macros/user_macros.html.j2" import user_display %}
+
+{% set status_badges = {
+  'pending': ('Waiting for an answer', 'text-bg-secondary'),
+  'answered': ('Answered', 'text-bg-success'),
+  'declined': ('Declined', 'text-bg-danger')
+} %}
+
+<div class="col-md-8 mx-auto pt-4">
+  <h2 class="text-center border-bottom pb-2 mb-4"><span>Requests</span></h2>
+
+  <!-- Requests other members sent to the current user -->
+  <h4 class="mb-1">Asked of you</h4>
+  <p class="text-muted small">These members asked you personally to answer their post.</p>
+
+  {% for r in received %}
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <span>{{ user_display(r.requester) }} asked you to answer their post</span>
+        <small class="text-muted">{{ r.created_at|datetimeformat }}</small>
+      </div>
+      <p class="mt-2 mb-2">{{ r.content|truncate(160) }}</p>
+
+      {% if r.status == 'pending' %}
+      <div class="d-flex">
+        <!-- #answer opens the comment window on the post page -->
+        <a href="/posts/{{ r.post_id }}#answer" class="btn btn-primary btn-sm me-2">Answer</a>
+        <form action="{{ url_for('decline_request', request_id=r.id) }}" method="POST">
+          <button type="submit" class="btn btn-light btn-sm">Decline</button>
+        </form>
+      </div>
+      {% else %}
+      <span class="badge {{ status_badges[r.status][1] }}">{{ status_badges[r.status][0] }}</span>
+      <a href="/posts/{{ r.post_id }}" class="btn btn-sm btn-light ms-2">View post</a>
+      {% endif %}
+    </div>
+  </div>
+  {% else %}
+  <p class="text-muted">Nobody has asked you anything yet.</p>
+  {% endfor %}
+
+  <!-- Requests the current user sent to others -->
+  <h4 class="mt-5 mb-1">Your requests</h4>
+  <p class="text-muted small">People you asked to answer your posts. Use "Ask someone" on one of your posts to ask more.</p>
+
+  {% for r in sent %}
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <span>You asked {{ user_display(r.recipient) }}</span>
+        <small class="text-muted">{{ r.created_at|datetimeformat }}</small>
+      </div>
+      <p class="mt-2 mb-2">{{ r.content|truncate(160) }}</p>
+      <span class="badge {{ status_badges[r.status][1] }}">{{ status_badges[r.status][0] }}</span>
+      <a href="/posts/{{ r.post_id }}" class="btn btn-sm btn-light ms-2">View post</a>
+    </div>
+  </div>
+  {% else %}
+  <p class="text-muted">You haven't asked anyone yet.</p>
+  {% endfor %}
+</div>
+
+{% endblock %}
