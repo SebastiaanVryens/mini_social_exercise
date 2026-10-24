@@ -1,0 +1,38 @@
+{% extends "base.html.j2" %}
+{% block content %}
+{% from "macros/people_macros.html.j2" import suggestion_row %}
+
+<div class="col-md-8 mx-auto pt-4">
+  <h2 class="text-center border-bottom pb-2 mb-4"><span>People you may know</span></h2>
+
+  {% if suggestions.kind == 'popular' %}
+  <p class="text-muted">
+    There are no friends of friends to suggest yet, because you don't follow anyone (or the people
+    you follow don't follow anyone else). Here are some popular members to get you started.
+    Once you follow a few people, you'll see the people they follow.
+  </p>
+  {% else %}
+  <p class="text-muted">
+    People followed by the people you follow. The more of your connections follow someone, the higher they appear.
+  </p>
+  {% endif %}
+
+  <div class="card shadow-sm">
+    <div class="card-body">
+      {% for person in suggestions.people %}
+        {{ suggestion_row(person) }}
+      {% else %}
+        <p class="text-center text-muted mb-0">No suggestions right now.</p>
+      {% endfor %}
+    </div>
+  </div>
+
+  {% if hidden_count %}
+  <form action="{{ url_for('reset_dismissed_suggestions') }}" method="POST" class="text-center mt-3">
+    <span class="text-muted small me-2">You marked {{ hidden_count }} {{ 'person' if hidden_count == 1 else 'people' }} as not interested.</span>
+    <button type="submit" class="btn btn-light btn-sm">Show them again</button>
+  </form>
+  {% endif %}
+</div>
+
+{% endblock %}

@@ -1,0 +1,22 @@
+{% from "macros/user_macros.html.j2" import user_display %}
+
+{# One "People you may know" suggestion with its Follow and Not interested buttons #}
+{% macro suggestion_row(person) %}
+<div class="d-flex justify-content-between align-items-center py-2 border-bottom">
+  <div>
+    {{ user_display(person.username) }}
+    {% if person.follows_you %}
+    <span class="badge text-bg-light border ms-1">Follows you</span>
+    {% endif %}
+    <div class="small text-muted">{{ person.reason }}</div>
+  </div>
+  <div class="d-flex flex-shrink-0 ms-2">
+    <form action="{{ url_for('follow_user', user_id=person.user_id) }}" method="POST">
+      <button type="submit" class="btn btn-primary btn-sm me-2">Follow</button>
+    </form>
+    <form action="{{ url_for('dismiss_suggestion', user_id=person.user_id) }}" method="POST">
+      <button type="submit" class="btn btn-light btn-sm">Not interested</button>
+    </form>
+  </div>
+</div>
+{% endmacro %}

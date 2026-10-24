@@ -192,8 +192,14 @@ def feed():
             'comments': comments_moderated
         })
 
-    #  4. Render Template with Pagination Info 
-    return render_template('feed.html.j2', 
+    #  "People you may know" card at the top of the first page (Design Claim 14 feature)
+    people_suggestions = None
+    if current_user_id and page == 1:
+        people_suggestions = get_people_suggestions(current_user_id, SUGGESTIONS_ON_FEED)
+
+    #  4. Render Template with Pagination Info
+    return render_template('feed.html.j2',
+                           people_suggestions=people_suggestions,
                            posts=posts_data, 
                            current_sort=sort,
                            current_show=show,
@@ -1362,6 +1368,176 @@ def loop_color(user_id):
     g = int(h[2:4], 16)
     b = int(h[4:6], 16)
     return f'rgb({r % 128 + 80}, {g % 128 + 80}, {b % 128 + 80})'
+
+
+# ----- Design Claim feature: "People you may know" (Chapter 3, Design Claim 14)
+# "Facilitating interaction with 'friends of friends' can enhance bonds-based commitment."
+# Members see people who are followed by the people they follow, together with the shared
+# connections, and can follow them or mark them as "Not interested".
+# Members who don't follow anyone yet have no friends of friends, so they get popular members instead.
+
+SUGGESTIONS_ON_FEED = 3
+SUGGESTIONS_ON_PAGE = 20
+# How many shared connections are named, e.g. "Followed by @a, @b and 12 others you follow"
+MUTUALS_NAMED = 2
+
+
+def init_dismissed_suggestions_table():
+    """Creates the table that remembers who a member marked as 'Not interested', if it does not exist yet."""
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS dismissed_suggestions (
+            user_id           INTEGER NOT NULL,
+            dismissed_user_id INTEGER NOT NULL,
+            created_at        TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            PRIMARY KEY (user_id, dismissed_user_id)
+        )
+    ''')
+    db.commit()
+    db.close()
+
+init_dismissed_suggestions_table()
+
+
+def describe_mutuals(names, count):
+    """Builds the 'Followed by ...' text that explains why someone is suggested."""
+    named = ['@' + name for name in names]
+    others = count - len(named)
+    if others > 0:
+        return f"Followed by {', '.join(named)} and {others} other{'s' if others != 1 else ''} you follow"
+    if len(named) == 1:
+        return f'Followed by {named[0]}, who you follow'
+    return f"Followed by {' and '.join(named)}, who you follow"
+
+
+def get_friends_of_friends(user_id, limit):
+    """
+    Returns members followed by the people the user follows, ranked by how many of the user's
+    connections follow them (people who follow the user back come first on a tie).
+    Excludes the user, people they already follow and people they marked as not interested.
+    """
+    rows = query_db('''
+        SELECT u.id AS user_id, u.username,
+               COUNT(DISTINCT friend.id) AS mutual_count,
+               EXISTS (SELECT 1 FROM follows WHERE follower_id = u.id AND followed_id = ?) AS follows_you
+        FROM follows f1
+        JOIN users friend ON friend.id = f1.followed_id
+        JOIN follows f2 ON f2.follower_id = friend.id
+        JOIN users u ON u.id = f2.followed_id
+        WHERE f1.follower_id = ?
+          AND u.id != ?
+          AND u.id NOT IN (SELECT followed_id FROM follows WHERE follower_id = ?)
+          AND u.id NOT IN (SELECT dismissed_user_id FROM dismissed_suggestions WHERE user_id = ?)
+        GROUP BY u.id
+        ORDER BY mutual_count DESC, follows_you DESC, u.username
+        LIMIT ?
+    ''', (user_id, user_id, user_id, user_id, user_id, limit)) or []
+
+    people = []
+    for row in rows:
+        person = dict(row)
+        # Name a few of the shared connections, they make the suggestion personal
+        mutuals = query_db('''
+            SELECT DISTINCT friend.username
+            FROM follows f1
+            JOIN users friend ON friend.id = f1.followed_id
+            JOIN follows f2 ON f2.follower_id = friend.id
+            WHERE f1.follower_id = ? AND f2.followed_id = ?
+            ORDER BY friend.username
+            LIMIT ?
+        ''', (user_id, person['user_id'], MUTUALS_NAMED)) or []
+        person['reason'] = describe_mutuals([m['username'] for m in mutuals], person['mutual_count'])
+        people.append(person)
+    return people
+
+
+def get_popular_members(user_id, limit):
+    """Fallback for members without friends of friends: the most-followed members they don't follow yet."""
+    rows = query_db('''
+        SELECT u.id AS user_id, u.username,
+               COUNT(DISTINCT f.follower_id) AS follower_count,
+               EXISTS (SELECT 1 FROM follows WHERE follower_id = u.id AND followed_id = ?) AS follows_you
+        FROM users u
+        JOIN follows f ON f.followed_id = u.id
+        WHERE u.id != ?
+          AND u.id NOT IN (SELECT followed_id FROM follows WHERE follower_id = ?)
+          AND u.id NOT IN (SELECT dismissed_user_id FROM dismissed_suggestions WHERE user_id = ?)
+        GROUP BY u.id
+        ORDER BY follower_count DESC, u.username
+        LIMIT ?
+    ''', (user_id, user_id, user_id, user_id, limit)) or []
+
+    people = []
+    for row in rows:
+        person = dict(row)
+        person['reason'] = f"Popular member, followed by {person['follower_count']} people"
+        people.append(person)
+    return people
+
+
+def get_people_suggestions(user_id, limit):
+    """Returns {'kind': 'friends_of_friends' or 'popular', 'people': [...]} for the given member."""
+    people = get_friends_of_friends(user_id, limit)
+    if people:
+        return {'kind': 'friends_of_friends', 'people': people}
+    return {'kind': 'popular', 'people': get_popular_members(user_id, limit)}
+
+
+@app.route('/people')
+def people_you_may_know():
+    """Shows the full list of people the current user may know."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to see people you may know.', 'danger')
+        return redirect(url_for('login'))
+
+    hidden_count = query_db('SELECT COUNT(*) AS cnt FROM dismissed_suggestions WHERE user_id = ?',
+                            (user_id,), one=True)['cnt']
+    return render_template('people.html.j2',
+                           suggestions=get_people_suggestions(user_id, SUGGESTIONS_ON_PAGE),
+                           hidden_count=hidden_count)
+
+
+@app.route('/people/<int:user_id>/dismiss', methods=['POST'])
+def dismiss_suggestion(user_id):
+    """Hides a suggested member: they won't be suggested to the current user again."""
+    current_user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not current_user_id:
+        flash('You must be logged in to hide suggestions.', 'danger')
+        return redirect(url_for('login'))
+
+    person = query_db('SELECT username FROM users WHERE id = ?', (user_id,), one=True)
+    if not person or user_id == current_user_id:
+        flash('Suggestion not found.', 'warning')
+        return redirect(request.referrer or url_for('people_you_may_know'))
+
+    db = get_db()
+    db.execute('INSERT OR IGNORE INTO dismissed_suggestions (user_id, dismissed_user_id) VALUES (?, ?)',
+               (current_user_id, user_id))
+    db.commit()
+    flash(f"Got it, we won't suggest @{person['username']} again.", 'info')
+    return redirect(request.referrer or url_for('people_you_may_know'))
+
+
+@app.route('/people/reset', methods=['POST'])
+def reset_dismissed_suggestions():
+    """Brings back everyone the current user marked as 'Not interested'."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to do this.', 'danger')
+        return redirect(url_for('login'))
+
+    db = get_db()
+    db.execute('DELETE FROM dismissed_suggestions WHERE user_id = ?', (user_id,))
+    db.commit()
+    flash('Hidden people can be suggested again.', 'info')
+    return redirect(url_for('people_you_may_know'))
 
 
 # ----- Functions to be implemented are below

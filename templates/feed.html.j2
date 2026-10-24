@@ -1,6 +1,7 @@
 {% extends "base.html.j2" %}
 {% block content %}
 {% from "macros/user_macros.html.j2" import user_display %}
+{% from "macros/people_macros.html.j2" import suggestion_row %}
 
 <div class="align-center text-center">
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
@@ -17,6 +18,25 @@
         </div>
         <button type="submit" class="btn btn-primary float-end">Post</button>
       </form>
+    </div>
+  </div>
+</div>
+{% endif %}
+
+<!-- "People you may know": friends of friends the user can follow -->
+{% if people_suggestions and people_suggestions.people %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center mb-1">
+        <h5 class="card-title mb-0">
+          {% if people_suggestions.kind == 'popular' %}Popular members to get you started{% else %}People you may know{% endif %}
+        </h5>
+        <a href="{{ url_for('people_you_may_know') }}" class="btn btn-sm btn-light">See all</a>
+      </div>
+      {% for person in people_suggestions.people %}
+        {{ suggestion_row(person) }}
+      {% endfor %}
     </div>
   </div>
 </div>

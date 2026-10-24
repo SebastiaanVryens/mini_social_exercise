@@ -49,6 +49,10 @@
 
         <!-- Check if user is logged in -->
         {% if session.get('user_id') %}
+          <!-- "People you may know" (friends of friends) -->
+          <li class="nav-item">
+            <a class="nav-link" href="{{ url_for('people_you_may_know') }}">People</a>
+          </li>
           <!-- Requests from the "Ask someone" feature, with the number of open requests -->
           <li class="nav-item">
             <a class="nav-link" href="{{ url_for('requests_inbox') }}">
