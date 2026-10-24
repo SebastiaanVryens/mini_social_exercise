@@ -178,11 +178,16 @@ def feed():
         reactions = query_db('SELECT reaction_type, COUNT(*) as count FROM reactions WHERE post_id = ? GROUP BY reaction_type', (post['id'],))
         comments_raw = query_db('SELECT c.id, c.content, c.created_at, u.username, u.id as user_id FROM comments c JOIN users u ON c.user_id = u.id WHERE c.post_id = ? ORDER BY c.created_at ASC', (post['id'],))
         post_dict = dict(post)
-        post_dict['content'], _ = moderate_content(post_dict['content'])
+        raw_post_content = post_dict['content']
+        # Moderated text, unless a moderator approved an appeal (Design Claim 3 feature)
+        post_dict['content'] = moderate_for_display('post', post_dict['id'], raw_post_content)
+        # Authors get a label on their own moderated posts, linking to where they can appeal
+        post_dict['moderated_for_author'] = (post_dict['user_id'] == current_user_id
+                                             and post_dict['content'] != raw_post_content)
         comments_moderated = []
         for comment in comments_raw:
             comment_dict = dict(comment)
-            comment_dict['content'], _ = moderate_content(comment_dict['content'])
+            comment_dict['content'] = moderate_for_display('comment', comment_dict['id'], comment_dict['content'])
             comments_moderated.append(comment_dict)
         posts_data.append({
             'post': post_dict,
@@ -221,19 +226,24 @@ def add_post():
     # Get content from the submitted form
     content = request.form.get('content')
 
-    # Pass the user's content through the moderation function
-    moderated_content = content
-
     # Basic validation to ensure post is not empty
-    if moderated_content and moderated_content.strip():
-        db = get_db()
-        db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
-                   (user_id, moderated_content))
-        db.commit()
-        flash('Your post was successfully created!', 'success')
-    else:
-        # This will catch empty posts or posts that were fully censored
-        flash('Post cannot be empty or was fully censored.', 'warning')
+    if not content or not content.strip():
+        flash('Post cannot be empty.', 'warning')
+        return redirect(url_for('feed'))
+
+    # Design Claim 20 feature: a post that breaks the rules is not published yet, the author
+    # first gets a reminder and can edit it, post it anyway or cancel
+    review_page = review_before_publishing(user_id, 'post', content)
+    if review_page:
+        return review_page
+
+    # The text is stored as written and moderate_content() is applied whenever it is displayed,
+    # so the admin dashboard can still score what the author actually wrote
+    db = get_db()
+    db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)',
+               (user_id, content))
+    db.commit()
+    flash('Your post was successfully created!', 'success')
 
     # Redirect back to the main feed to see the new post
     return redirect(url_for('feed'))
@@ -293,16 +303,14 @@ def user_profile(username):
     posts = []
     for post_raw in posts_raw:
         post = dict(post_raw)
-        moderated_post_content, _ = moderate_content(post['content'])
-        post['content'] = moderated_post_content
+        post['content'] = moderate_for_display('post', post['id'], post['content'])
         posts.append(post)
 
     comments_raw = query_db('SELECT id, content, user_id, post_id, created_at FROM comments WHERE user_id = ? ORDER BY created_at DESC LIMIT 100', (user['id'],))
     comments = []
     for comment_raw in comments_raw:
         comment = dict(comment_raw)
-        moderated_comment_content, _ = moderate_content(comment['content'])
-        comment['content'] = moderated_comment_content
+        comment['content'] = moderate_for_display('comment', comment['id'], comment['content'])
         comments.append(comment)
 
     followers_count = query_db('SELECT COUNT(*) as cnt FROM follows WHERE followed_id = ?', (user['id'],), one=True)['cnt']
@@ -393,9 +401,15 @@ def post_detail(post_id):
     #  Moderation for the Main Post 
     # Convert the raw database row to a mutable dictionary
     post = dict(post_raw)
-    # Unpack the tuple from moderate_content, we only need the moderated content string here
-    moderated_post_content, _ = moderate_content(post['content'])
-    post['content'] = moderated_post_content
+    raw_post_content = post['content']
+    # Moderated text, unless a moderator approved an appeal (Design Claim 3 feature)
+    post['content'] = moderate_for_display('post', post['id'], raw_post_content)
+
+    # The author sees which rules changed their post and can appeal (Design Claim 3 feature)
+    current_user_id = session.get('user_id')
+    post_notice = None
+    if current_user_id == post['user_id']:
+        post_notice = get_moderation_notice('post', post['id'], raw_post_content)
 
     #  Fetch Reactions (No moderation needed) 
     reactions = query_db('''
@@ -413,8 +427,12 @@ def post_detail(post_id):
         comment = dict(comment_raw) # Convert to a dictionary
         # Moderate the content of each comment
         print(comment['content'])
-        moderated_comment_content, _ = moderate_content(comment['content'])
-        comment['content'] = moderated_comment_content
+        raw_comment_content = comment['content']
+        comment['content'] = moderate_for_display('comment', comment['id'], raw_comment_content)
+        # Like posts, comment authors see the moderation notice on their own comments
+        comment['notice'] = None
+        if current_user_id == comment['user_id']:
+            comment['notice'] = get_moderation_notice('comment', comment['id'], raw_comment_content)
         comments.append(comment)
 
     # Pass the moderated data to the template
@@ -424,7 +442,9 @@ def post_detail(post_id):
                            comments=comments,
                            reaction_emojis=REACTION_EMOJIS,
                            reaction_types=REACTION_TYPES,
-                           **get_ask_context(post, session.get('user_id')))
+                           post_notice=post_notice,
+                           # "Ask someone" suggestions use the words the author actually wrote
+                           **get_ask_context(dict(post, content=raw_post_content), current_user_id))
 
 @app.route('/about')
 def about():
@@ -520,22 +540,32 @@ def add_comment(post_id):
     content = request.form.get('content')
 
     # Basic validation to ensure comment is not empty
-    if content and content.strip():
-        db = get_db()
-        db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
-                   (post_id, user_id, content))
-        # If the author personally asked this member to answer, the request is now answered
-        answered = db.execute('''
-            UPDATE ask_requests SET status = 'answered', responded_at = CURRENT_TIMESTAMP
-            WHERE post_id = ? AND recipient_id = ? AND status != 'answered'
-        ''', (post_id, user_id)).rowcount
-        db.commit()
-        if answered:
-            flash('Thanks for answering! The member who asked you will see your reply.', 'success')
-        else:
-            flash('Your comment was added.', 'success')
-    else:
+    if not content or not content.strip():
         flash('Comment cannot be empty.', 'warning')
+        return redirect(request.referrer or url_for('post_detail', post_id=post_id))
+
+    # Design Claim 20 feature: a comment that breaks the rules first gets a reminder
+    review_page = review_before_publishing(user_id, 'comment', content, post_id=post_id)
+    if review_page:
+        return review_page
+
+    db = get_db()
+    db.execute('INSERT INTO comments (post_id, user_id, content) VALUES (?, ?, ?)',
+               (post_id, user_id, content))
+    # If the author personally asked this member to answer, the request is now answered
+    answered = db.execute('''
+        UPDATE ask_requests SET status = 'answered', responded_at = CURRENT_TIMESTAMP
+        WHERE post_id = ? AND recipient_id = ? AND status != 'answered'
+    ''', (post_id, user_id)).rowcount
+    db.commit()
+    if answered:
+        flash('Thanks for answering! The member who asked you will see your reply.', 'success')
+    else:
+        flash('Your comment was added.', 'success')
+
+    # Coming from the review page, the referrer is that page itself, so go to the post instead
+    if request.form.get('reminder_id'):
+        return redirect(url_for('post_detail', post_id=post_id))
 
     # Redirect back to the page the user came from (likely the post detail page)
     return redirect(request.referrer or url_for('post_detail', post_id=post_id))
@@ -814,6 +844,20 @@ def admin_dashboard():
 
     comments.sort(key=lambda x: x['risk_score'], reverse=True) # Sort after fetching and scoring
 
+    # --- Appeals Tab Data (Design Claim 3 feature) ---
+    appeals = get_appeals_for_admin()
+    appeals_pending = sum(1 for appeal in appeals if appeal['status'] == 'pending')
+
+    # --- Reminders Tab Data (Design Claim 20 feature) ---
+    reminder_stats = get_reminder_stats()
+    recent_reminders = query_db('''
+        SELECT mr.content_type, mr.original_content, mr.original_score, mr.final_score,
+               mr.outcome, mr.created_at, u.username
+        FROM moderation_reminders mr
+        JOIN users u ON u.id = mr.user_id
+        ORDER BY mr.id DESC
+        LIMIT 50
+    ''') or []
 
     return render_template('admin.html.j2', 
                            users=users, 
@@ -839,7 +883,15 @@ def admin_dashboard():
                            comments_has_prev=(comments_page > 1),
 
                            current_tab=current_tab,
-                           PAGE_SIZE=PAGE_SIZE)
+                           PAGE_SIZE=PAGE_SIZE,
+
+                           # Reminders (check before posting)
+                           reminder_stats=reminder_stats,
+                           recent_reminders=recent_reminders,
+
+                           # Appeals against moderation
+                           appeals=appeals,
+                           appeals_pending=appeals_pending)
 
 
 
@@ -1148,13 +1200,13 @@ def requests_inbox():
     received = []
     for row in received_raw:
         item = dict(row)
-        item['content'], _ = moderate_content(item['content'])
+        item['content'] = moderate_for_display('post', item['post_id'], item['content'])
         received.append(item)
 
     sent = []
     for row in sent_raw:
         item = dict(row)
-        item['content'], _ = moderate_content(item['content'])
+        item['content'] = moderate_for_display('post', item['post_id'], item['content'])
         sent.append(item)
 
     return render_template('requests.html.j2', received=received, sent=sent)
@@ -1540,6 +1592,379 @@ def reset_dismissed_suggestions():
     return redirect(url_for('people_you_may_know'))
 
 
+# ----- Design Claim feature: Check before posting (Chapter 4, Design Claim 20)
+# "Offering people reminders at the point of an action that may violate norms reduces the number of offenses."
+# When a member submits a post or comment, it is first checked with the moderation rules. If it
+# breaks a rule, it is not published yet: the member sees a review page that shows what was found
+# and what others would see, and can edit the text, post it anyway, or cancel. Severe content
+# (Tier 1 words and scam phrases) cannot be posted anyway, because it would be removed completely.
+# Every reminder and what the member did with it is stored, and the admin dashboard shows how
+# often reminders led people to fix their text.
+
+def init_moderation_reminders_table():
+    """Creates the table that stores every reminder and its outcome, if it does not exist yet."""
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS moderation_reminders (
+            id               INTEGER PRIMARY KEY AUTOINCREMENT,
+            user_id          INTEGER NOT NULL,
+            content_type     TEXT    NOT NULL,                   -- post or comment
+            post_id          INTEGER,                            -- for comments: the post commented on
+            original_content TEXT    NOT NULL,
+            original_score   REAL    NOT NULL,
+            final_score      REAL,                               -- score of the text that was finally posted
+            outcome          TEXT    NOT NULL DEFAULT 'pending', -- pending, fixed, posted_anyway or cancelled
+            created_at       TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            resolved_at      TIMESTAMP
+        )
+    ''')
+    db.commit()
+    db.close()
+
+init_moderation_reminders_table()
+
+
+def risk_label(score):
+    """Translates a score into the risk levels from the /rules page."""
+    if score >= 5.0:
+        return 'HIGH'
+    if score >= 3.0:
+        return 'MEDIUM'
+    if score >= 1.0:
+        return 'LOW'
+    return 'NONE'
+
+
+def highlight_violations(text, violations):
+    """
+    Splits a text into pieces and marks the pieces that break a rule, so the review page can
+    highlight them. Each piece is {'text': ..., 'labels': None or 'Mild profanity, ...'}.
+    """
+    spans = sorted((v['start'], v['end'], v['label']) for v in violations if v.get('text'))
+
+    # Merge overlapping spans, e.g. a Tier 3 word inside a link
+    merged = []
+    for start, end, label in spans:
+        if merged and start < merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+            if label not in merged[-1][2]:
+                merged[-1][2].append(label)
+        else:
+            merged.append([start, end, [label]])
+
+    segments = []
+    position = 0
+    for start, end, labels in merged:
+        if start > position:
+            segments.append({'text': text[position:start], 'labels': None})
+        segments.append({'text': text[start:end], 'labels': ', '.join(labels)})
+        position = end
+    if position < len(text):
+        segments.append({'text': text[position:], 'labels': None})
+    return segments
+
+
+def review_before_publishing(user_id, content_type, content, post_id=None):
+    """
+    Checks a post or comment with the moderation rules before it is published.
+
+    Returns None when the text may be published: it breaks no rules, or the author chose
+    'Post anyway' on the review page. Otherwise it returns the review page, which shows the
+    author what the rules will do to their text. The outcome of every reminder is stored.
+    """
+    moderated_content, score, violations = analyze_content(content)
+    action = request.form.get('review_action')  # None on the first submit, then 'check' or 'post_anyway'
+
+    # A reminder that is already open for this draft (the author is coming from the review page)
+    reminder = None
+    reminder_id = request.form.get('reminder_id', type=int)
+    if reminder_id:
+        reminder = query_db("SELECT id FROM moderation_reminders WHERE id = ? AND user_id = ? AND outcome = 'pending'",
+                            (reminder_id, user_id), one=True)
+
+    db = get_db()
+
+    # Clean text is published right away; if the author edited it after a reminder, it counts as fixed
+    if score == 0:
+        if reminder:
+            db.execute('''
+                UPDATE moderation_reminders SET outcome = 'fixed', final_score = 0, resolved_at = CURRENT_TIMESTAMP
+                WHERE id = ?
+            ''', (reminder['id'],))
+            db.commit()
+        return None
+
+    # Severe content would be removed completely, so 'Post anyway' is only allowed for milder violations
+    severe = moderated_content in (SEVERE_REMOVAL_MESSAGE, SPAM_REMOVAL_MESSAGE)
+    if action == 'post_anyway' and reminder and not severe:
+        db.execute('''
+            UPDATE moderation_reminders SET outcome = 'posted_anyway', final_score = ?, resolved_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+        ''', (score, reminder['id']))
+        db.commit()
+        return None
+
+    # First time this draft breaks a rule: store the reminder
+    if not reminder:
+        cur = db.execute('''
+            INSERT INTO moderation_reminders (user_id, content_type, post_id, original_content, original_score)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (user_id, content_type, post_id, content, score))
+        db.commit()
+        reminder_id = cur.lastrowid
+
+    # For comments, show which post the comment is for
+    commented_post = None
+    if post_id:
+        commented_post = query_db('''
+            SELECT p.id, p.content, u.username FROM posts p JOIN users u ON u.id = p.user_id WHERE p.id = ?
+        ''', (post_id,), one=True)
+
+    form_action = url_for('add_comment', post_id=post_id) if content_type == 'comment' else url_for('add_post')
+    return render_template('moderation_review.html.j2',
+                           content_type=content_type,
+                           content=content,
+                           segments=highlight_violations(content, violations),
+                           violations=violations,
+                           moderated_content=moderated_content,
+                           score=round(score, 2),
+                           risk_label=risk_label(score),
+                           severe=severe,
+                           blocked_attempt=(action == 'post_anyway' and severe),
+                           reminder_id=reminder_id,
+                           post_id=post_id,
+                           commented_post=commented_post,
+                           form_action=form_action)
+
+
+@app.route('/moderation/reminders/<int:reminder_id>/cancel', methods=['POST'])
+def cancel_reminder(reminder_id):
+    """Discards a draft from the review page."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to do this.', 'danger')
+        return redirect(url_for('login'))
+
+    db = get_db()
+    db.execute('''
+        UPDATE moderation_reminders SET outcome = 'cancelled', resolved_at = CURRENT_TIMESTAMP
+        WHERE id = ? AND user_id = ? AND outcome = 'pending'
+    ''', (reminder_id, user_id))
+    db.commit()
+    flash('Your draft was discarded.', 'info')
+
+    post_id = request.form.get('post_id', type=int)
+    return redirect(url_for('post_detail', post_id=post_id) if post_id else url_for('feed'))
+
+
+def get_reminder_stats():
+    """Numbers for the admin dashboard: how many reminders were shown and what members did after them."""
+    rows = query_db('SELECT outcome, COUNT(*) AS cnt FROM moderation_reminders GROUP BY outcome') or []
+    counts = {row['outcome']: row['cnt'] for row in rows}
+    total = sum(counts.values())
+
+    def percent(outcome):
+        return round(100 * counts.get(outcome, 0) / total) if total else 0
+
+    return {
+        'total': total,
+        'fixed': counts.get('fixed', 0), 'fixed_percent': percent('fixed'),
+        'cancelled': counts.get('cancelled', 0), 'cancelled_percent': percent('cancelled'),
+        'posted_anyway': counts.get('posted_anyway', 0), 'posted_anyway_percent': percent('posted_anyway'),
+        'pending': counts.get('pending', 0), 'pending_percent': percent('pending'),
+    }
+
+
+# ----- Design Claim feature: Moderation appeals (Chapter 4, Design Claim 3)
+# "Consistently applied moderation criteria, a chance to argue one's case, and appeal procedures
+# increase the legitimacy and thus the effectiveness of moderation decisions."
+# The author of a moderated post or comment sees which rule was applied (the same published rules
+# for everyone) and can appeal with a written reason. The admin reviews appeals in the dashboard:
+# approving shows the content as it was written, rejecting requires an explanation for the author.
+# Past decisions stay visible to the admin, so similar cases can be decided the same way.
+
+def init_moderation_appeals_table():
+    """Creates the table that stores appeals against moderation, if it does not exist yet."""
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS moderation_appeals (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            content_type TEXT    NOT NULL,                   -- post or comment
+            content_id   INTEGER NOT NULL,
+            user_id      INTEGER NOT NULL,                   -- the author who appeals
+            reason       TEXT    NOT NULL,
+            status       TEXT    NOT NULL DEFAULT 'pending', -- pending, approved or rejected
+            admin_note   TEXT,                               -- the moderator's explanation
+            created_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            decided_at   TIMESTAMP,
+            UNIQUE (content_type, content_id)                -- each decision can be appealed once
+        )
+    ''')
+    db.commit()
+    db.close()
+
+init_moderation_appeals_table()
+
+
+def get_appeals_by_content():
+    """Returns {(content_type, content_id): appeal} for all appeals, loaded once per request."""
+    if 'appeals_by_content' not in g:
+        rows = query_db('SELECT id, content_type, content_id, reason, status, admin_note FROM moderation_appeals') or []
+        g.appeals_by_content = {(row['content_type'], row['content_id']): dict(row) for row in rows}
+    return g.appeals_by_content
+
+
+@app.template_global()
+def appeal_status(content_type, content_id):
+    """Status of the appeal for a post or comment (None if there is none), used for the 'Restored after appeal' label."""
+    appeal = get_appeals_by_content().get((content_type, content_id))
+    return appeal['status'] if appeal else None
+
+
+def moderate_for_display(content_type, content_id, content):
+    """
+    Returns the text that everyone sees: the moderated text, or the text as it was written
+    when a moderator approved an appeal for it.
+    """
+    if appeal_status(content_type, content_id) == 'approved':
+        return content
+    moderated_content, _ = moderate_content(content)
+    return moderated_content
+
+
+def get_moderation_notice(content_type, content_id, content):
+    """
+    For the author only: which rules changed their post or comment, and the state of their appeal.
+    Returns None if moderation didn't change the text, because then there is nothing to appeal.
+    """
+    moderated_content, _, violations = analyze_content(content)
+    if moderated_content == content:
+        return None
+    return {
+        'content_type': content_type,
+        'content_id': content_id,
+        'violations': violations,
+        'appeal': get_appeals_by_content().get((content_type, content_id)),
+    }
+
+
+def get_appealed_content(content_type, content_id):
+    """Looks up the post or comment an appeal is about, with the post it belongs to (None if it doesn't exist)."""
+    if content_type == 'post':
+        return query_db('SELECT id, user_id, content, id AS post_id FROM posts WHERE id = ?', (content_id,), one=True)
+    if content_type == 'comment':
+        return query_db('SELECT id, user_id, content, post_id FROM comments WHERE id = ?', (content_id,), one=True)
+    return None
+
+
+@app.route('/appeals/new', methods=['POST'])
+def create_appeal():
+    """Lets the author of a moderated post or comment appeal the decision, with a written reason."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to appeal.', 'danger')
+        return redirect(url_for('login'))
+
+    content_type = request.form.get('content_type')
+    content_id = request.form.get('content_id', type=int)
+    reason = (request.form.get('reason') or '').strip()
+    item = get_appealed_content(content_type, content_id)
+
+    if not item or item['user_id'] != user_id:
+        flash('You can only appeal the moderation of your own posts and comments.', 'danger')
+        return redirect(url_for('feed'))
+
+    if moderate_content(item['content'])[0] == item['content']:
+        flash('Nothing was moderated here, so there is nothing to appeal.', 'info')
+    elif appeal_status(content_type, content_id):
+        flash('You already appealed this decision.', 'info')
+    elif len(reason) < 10:
+        flash('Please explain in at least a short sentence why this should be allowed.', 'warning')
+    else:
+        db = get_db()
+        db.execute('INSERT INTO moderation_appeals (content_type, content_id, user_id, reason) VALUES (?, ?, ?, ?)',
+                   (content_type, content_id, user_id, reason))
+        db.commit()
+        flash('Your appeal was sent. A moderator will review it.', 'success')
+
+    return redirect(url_for('post_detail', post_id=item['post_id']))
+
+
+@app.route('/appeals')
+def my_appeals():
+    """Shows the current user's appeals and the moderator's decisions."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to see your appeals.', 'danger')
+        return redirect(url_for('login'))
+
+    appeals = []
+    rows = query_db('SELECT * FROM moderation_appeals WHERE user_id = ? ORDER BY created_at DESC', (user_id,)) or []
+    for row in rows:
+        appeal = dict(row)
+        item = get_appealed_content(appeal['content_type'], appeal['content_id'])
+        if item:  # Skip appeals about content that was deleted since
+            appeal['content'] = item['content']
+            appeal['post_id'] = item['post_id']
+            appeals.append(appeal)
+
+    return render_template('appeals.html.j2', appeals=appeals)
+
+
+def get_appeals_for_admin():
+    """All appeals for the admin dashboard, open ones first, with what the rules did to each text."""
+    appeals = []
+    rows = query_db('''
+        SELECT a.*, u.username
+        FROM moderation_appeals a
+        JOIN users u ON u.id = a.user_id
+        ORDER BY a.status = 'pending' DESC, a.created_at DESC
+    ''') or []
+    for row in rows:
+        appeal = dict(row)
+        item = get_appealed_content(appeal['content_type'], appeal['content_id'])
+        if not item:  # The content was deleted since
+            continue
+        appeal['content'] = item['content']
+        appeal['post_id'] = item['post_id']
+        appeal['moderated_content'], appeal['score'], appeal['violations'] = analyze_content(item['content'])
+        appeals.append(appeal)
+    return appeals
+
+
+@app.route('/admin/appeals/<int:appeal_id>/decide', methods=['POST'])
+def decide_appeal(appeal_id):
+    """Admin decision on an appeal: approve (show the content as written) or reject (with an explanation)."""
+    if session.get('username') != 'admin':
+        flash("You do not have permission to perform this action.", "danger")
+        return redirect(url_for('feed'))
+
+    decision = request.form.get('decision')
+    note = (request.form.get('note') or '').strip()
+
+    if decision not in ('approved', 'rejected'):
+        flash('Unknown decision.', 'warning')
+    elif decision == 'rejected' and not note:
+        # A rejection always comes with a reason, so the member understands the decision
+        flash('Please explain why the appeal is rejected, the member will see your explanation.', 'warning')
+    else:
+        db = get_db()
+        db.execute('''
+            UPDATE moderation_appeals SET status = ?, admin_note = ?, decided_at = CURRENT_TIMESTAMP
+            WHERE id = ? AND status = 'pending'
+        ''', (decision, note or None, appeal_id))
+        db.commit()
+        flash(f'Appeal {decision}.', 'success')
+
+    return redirect(url_for('admin_dashboard', tab='appeals'))
+
+
 # ----- Functions to be implemented are below
 # Coding Assignment #2
 
@@ -1556,14 +1981,151 @@ def user_risk_analysis(user_id):
             username: admin
             password: admin
         Then, navigate to the /admin endpoint. (http://localhost:8081/admin)
+
+    Implements Rule 2.2 (User Risk Score) from the /rules page.
     """
-    
-    score = 0
+    user = query_db('SELECT profile, created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user:
+        return 0.0
 
-    return score;
+    # Step 1: Content Score of the profile text
+    _, profile_score = moderate_content(user['profile'] or '')
 
-    
+    # Step 2: average Content Score of all posts (0 if the user has no posts)
+    posts = query_db('SELECT content FROM posts WHERE user_id = ?', (user_id,)) or []
+    post_scores = [moderate_content(post['content'])[1] for post in posts]
+    average_post_score = sum(post_scores) / len(post_scores) if post_scores else 0
+
+    # Step 3: average Content Score of all comments (0 if the user has no comments)
+    comments = query_db('SELECT content FROM comments WHERE user_id = ?', (user_id,)) or []
+    comment_scores = [moderate_content(comment['content'])[1] for comment in comments]
+    average_comment_score = sum(comment_scores) / len(comment_scores) if comment_scores else 0
+
+    # Step 4: combine the scores, posts weigh three times as much as the profile and comments
+    content_risk_score = (profile_score * 1) + (average_post_score * 3) + (average_comment_score * 1)
+
+    # Step 5: new accounts are riskier, so their score is multiplied
+    created_at = user['created_at']
+    if isinstance(created_at, str):
+        created_at = datetime.strptime(created_at[:19], '%Y-%m-%d %H:%M:%S')
+    account_age_days = (datetime.utcnow() - created_at).days
+    if account_age_days < 7:
+        user_risk_score = content_risk_score * 1.5
+    elif account_age_days < 30:
+        user_risk_score = content_risk_score * 1.2
+    else:
+        user_risk_score = content_risk_score
+
+    # Step 6: cap the score at 5.0
+    return min(user_risk_score, 5.0)
+
+
 # Assignment 2.1
+SEVERE_REMOVAL_MESSAGE = '[content removed due to severe violation]'
+SPAM_REMOVAL_MESSAGE = '[content removed due to spam/scam policy]'
+
+
+def build_term_pattern(terms):
+    """
+    Builds one regex that finds any of the terms as a whole word or whole phrase, ignoring case.
+    Longer terms are tried first, so a phrase wins over a shorter term inside it.
+    """
+    terms = sorted({term.strip() for term in terms if term.strip()}, key=len, reverse=True)
+    if not terms:
+        return re.compile(r'(?!x)x')  # A regex that never matches
+    # Words inside a phrase may be separated by any whitespace
+    alternatives = [r'\s+'.join(re.escape(part) for part in term.split()) for term in terms]
+    # (?<!\w) and (?!\w) only allow whole words: 'ass' must not match inside 'class'
+    return re.compile(r'(?<!\w)(?:' + '|'.join(alternatives) + r')(?!\w)', re.IGNORECASE)
+
+
+# Compiled once at startup, because content is moderated every time it is displayed
+TIER1_PATTERN = build_term_pattern(TIER1_WORDS)
+TIER2_PATTERN = build_term_pattern(TIER2_PHRASES)
+TIER3_PATTERN = build_term_pattern(TIER3_WORDS)
+
+# Links starting with http(s):// or www., and bare domains like 'example.com/page'
+# (the spam links in the database are all written as bare domains)
+URL_PATTERN = re.compile(
+    r"(?:https?://|www\.)[^\s<>\"']*[^\s<>\"'.,!?;:)\]]"
+    r"|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*"
+    r"\.(?:com|net|org|edu|gov|io|info|biz|xyz|co|ru|uk|de|fi|eu|me|ly|app|dev|shop|online|site|top|tk)\b"
+    r"(?:/[^\s<>\"']*[^\s<>\"'.,!?;:)\]])?",
+    re.IGNORECASE)
+
+
+def make_violation(rule, label, match, points, effect):
+    """Describes one rule violation found in a text, including where it is in the original text."""
+    return {'rule': rule, 'label': label, 'text': match.group(), 'start': match.start(),
+            'end': match.end(), 'points': points, 'effect': effect}
+
+
+def analyze_content(content):
+    """
+    Applies the content moderation rules (Part 1 of the /rules page) to a text.
+
+    Returns a tuple (moderated_content, score, violations). The violations list explains what was
+    found, which is used by the "check before posting" feature (Design Claim 20) to show authors
+    what will happen to their text. moderate_content() returns only the first two values.
+    """
+    text = content or ''
+
+    # Rule 1.1.1: a Tier 1 word removes the whole content, with a fixed score of 5.0
+    tier1_matches = list(TIER1_PATTERN.finditer(text))
+    if tier1_matches:
+        violations = [make_violation('1.1.1', 'Severe language', match, 5.0, 'The whole text will be removed.')
+                      for match in tier1_matches]
+        return SEVERE_REMOVAL_MESSAGE, 5.0, violations
+
+    # Rule 1.1.2: if there is no Tier 1 word, a Tier 2 phrase also removes the whole content
+    tier2_matches = list(TIER2_PATTERN.finditer(text))
+    if tier2_matches:
+        violations = [make_violation('1.1.2', 'Spam or scam phrase', match, 5.0, 'The whole text will be removed.')
+                      for match in tier2_matches]
+        return SPAM_REMOVAL_MESSAGE, 5.0, violations
+
+    # Stage 1.2: the score starts at 0.0 and goes up for every violation
+    score = 0.0
+    violations = []
+
+    # Rule 1.2.1: each Tier 3 word is replaced with asterisks of the same length, +2.0 each
+    tier3_matches = list(TIER3_PATTERN.finditer(text))
+    for match in tier3_matches:
+        violations.append(make_violation('1.2.1', 'Mild profanity', match, 2.0,
+                                         f"Will be shown as {'*' * len(match.group())}."))
+        score += 2.0
+
+    # Rule 1.2.2: each link is replaced with [link removed], +2.0 each
+    url_matches = list(URL_PATTERN.finditer(text))
+    for match in url_matches:
+        violations.append(make_violation('1.2.2', 'External link', match, 2.0,
+                                         'Will be shown as [link removed].'))
+        score += 2.0
+
+    # Build the moderated text from the original. A Tier 3 word inside a link disappears together
+    # with the link, so only Tier 3 words outside links are replaced separately.
+    replacements = [(m.start(), m.end(), '[link removed]') for m in url_matches]
+    replacements += [(m.start(), m.end(), '*' * len(m.group())) for m in tier3_matches
+                     if not any(m.start() < url.end() and url.start() < m.end() for url in url_matches)]
+    pieces = []
+    position = 0
+    for start, end, replacement in sorted(replacements):
+        pieces.append(text[position:start])
+        pieces.append(replacement)
+        position = end
+    pieces.append(text[position:])
+    moderated_content = ''.join(pieces)
+
+    # Rule 1.2.3: more than 15 letters of which more than 70% are capitals, +0.5 (the text is not changed)
+    letters = [char for char in text if char.isalpha()]
+    if len(letters) > 15 and sum(char.isupper() for char in letters) / len(letters) > 0.7:
+        score += 0.5
+        violations.append({'rule': '1.2.3', 'label': 'Excessive capitalization', 'text': None, 'points': 0.5,
+                           'effect': 'Your text stays the same, but writing in capitals counts as shouting.'})
+
+    return moderated_content, score, violations
+
+
 def moderate_content(content):
     """
     Args
@@ -1579,11 +2141,11 @@ def moderate_content(content):
             username: admin
             password: admin
     Then, navigate to the /admin endpoint. (http://localhost:8081/admin)
-    """
 
-    moderated_content = content
-    score = 0
-    
+    Implements Part 1 (Content-Level Moderation) of the /rules page; the rules themselves are
+    applied step by step in analyze_content() above.
+    """
+    moderated_content, score, _ = analyze_content(content)
     return moderated_content, score
 
 # Coding Assignment #3

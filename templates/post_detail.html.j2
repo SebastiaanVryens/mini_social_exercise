@@ -1,6 +1,7 @@
 {% extends "base.html.j2" %}
 {% block content %}
 {% from "macros/user_macros.html.j2" import user_display %}
+{% from "macros/moderation_macros.html.j2" import moderation_notice, restored_label %}
 
 <div class="col-md-8 mx-auto pt-4">
   <!-- Shown when the author of this post personally asked the current user to answer it -->
@@ -36,7 +37,10 @@
         {% endif %}
       </div>
       
-      <p class="card-text mt-2">{{ post.content }}</p>
+      <p class="card-text mt-2">{{ post.content }} {{ restored_label('post', post.id) }}</p>
+
+      <!-- Only for the author: which rules changed this post, and the appeal (Design Claim 3) -->
+      {% if post_notice %}{{ moderation_notice(post_notice) }}{% endif %}
 
       <!-- Reactions Display and Add Reaction Button (Copied from feed.html.j2) -->
       <div class="d-flex align-items-center mt-2 mb-2">
@@ -117,7 +121,8 @@
           <div class="d-flex justify-content-between">
             <div>
               <strong><a href="/u/{{ comment.username }}">{{ user_display(comment.username) }}</a></strong>
-              <p class="mb-0">{{ comment.content }}</p>
+              <p class="mb-0">{{ comment.content }} {{ restored_label('comment', comment.id) }}</p>
+              {% if comment.notice %}{{ moderation_notice(comment.notice) }}{% endif %}
               
             
             {% if session.get('user_id') == comment.user_id or session.get('user_id') == post.user_id %}
@@ -205,9 +210,13 @@
 {% endif %}
 
 <script>
-  // Open the right modal when arriving from an "Ask someone" (#ask) or "Answer" (#answer) link
+  // Open the right modal when arriving from an "Ask someone" (#ask), "Answer" (#answer) or appeal (#appeal) link
   document.addEventListener("DOMContentLoaded", () => {
-    const modalIds = { "#ask": "askModal", "#answer": "addCommentModal-{{ post.id }}" };
+    const modalIds = {
+      "#ask": "askModal",
+      "#answer": "addCommentModal-{{ post.id }}",
+      "#appeal": "appealModal-post-{{ post.id }}",
+    };
     const modal = document.getElementById(modalIds[window.location.hash]);
     if (modal) {
       bootstrap.Modal.getOrCreateInstance(modal).show();

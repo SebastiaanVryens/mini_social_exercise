@@ -1,0 +1,38 @@
+{% extends "base.html.j2" %}
+{% block content %}
+
+{# Design Claim 3 feature: the member's own appeals against moderation and the moderator's decisions #}
+{% set status_badges = {
+  'pending': ('Waiting for a moderator', 'text-bg-secondary'),
+  'approved': ('Approved', 'text-bg-success'),
+  'rejected': ('Rejected', 'text-bg-danger')
+} %}
+
+<div class="col-md-8 mx-auto pt-4">
+  <h2 class="text-center border-bottom pb-2 mb-4"><span>My appeals</span></h2>
+  <p class="text-muted small">
+    When a post or comment of yours is moderated, you can appeal on the post's page.
+    A moderator reads your explanation and decides; when an appeal is rejected, the moderator explains why.
+  </p>
+
+  {% for appeal in appeals %}
+  <div class="card mb-3">
+    <div class="card-body">
+      <div class="d-flex justify-content-between align-items-center">
+        <span class="badge {{ status_badges[appeal.status][1] }}">{{ status_badges[appeal.status][0] }}</span>
+        <small class="text-muted">Appealed {{ appeal.created_at|datetimeformat }}</small>
+      </div>
+      <p class="mt-2 mb-1"><strong>Your {{ appeal.content_type }}:</strong> {{ appeal.content|truncate(160) }}</p>
+      <p class="mb-1"><strong>Your reason:</strong> {{ appeal.reason }}</p>
+      {% if appeal.admin_note %}
+      <p class="mb-1"><strong>Moderator:</strong> {{ appeal.admin_note }}</p>
+      {% endif %}
+      <a href="/posts/{{ appeal.post_id }}" class="btn btn-sm btn-light mt-2">View {{ 'post' if appeal.content_type == 'post' else 'comment' }}</a>
+    </div>
+  </div>
+  {% else %}
+  <p class="text-center text-muted">You haven't appealed anything yet.</p>
+  {% endfor %}
+</div>
+
+{% endblock %}

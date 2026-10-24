@@ -1,0 +1,78 @@
+{% extends "base.html.j2" %}
+{% block content %}
+
+{# Review page of the "check before posting" feature (Design Claim 20): shown instead of publishing
+   a post or comment that breaks the rules, so the author can fix it first. #}
+{% set risk_badges = {
+  'HIGH': 'bg-danger', 'MEDIUM': 'bg-warning text-dark', 'LOW': 'bg-info text-dark', 'NONE': 'bg-secondary'
+} %}
+
+<div class="col-md-8 mx-auto pt-4">
+  <div class="card shadow-sm border-warning">
+    <div class="card-body">
+      <h3 class="card-title">Before you post this {{ content_type }}…</h3>
+      <p class="mb-3">
+        Your {{ content_type }} breaks our <a href="/rules">community rules</a>.
+        <strong>Nothing has been published yet</strong>, so you can still change it.
+      </p>
+
+      {% if commented_post %}
+      <p class="small text-muted">
+        Comment on <a href="{{ url_for('post_detail', post_id=commented_post.id) }}">@{{ commented_post.username }}'s post</a>:
+        "{{ commented_post.content|truncate(80) }}"
+      </p>
+      {% endif %}
+
+      {% if blocked_attempt %}
+      <div class="alert alert-danger">This {{ content_type }} can't be posted as it is, because it would be removed completely. Please edit it first.</div>
+      {% endif %}
+
+      <!-- What the rules found, one line per violation -->
+      <h6>What we found</h6>
+      <ul class="mb-3">
+        {% for v in violations %}
+        <li>
+          <strong>{{ v.label }}</strong>{% if v.text %}: <mark>{{ v.text }}</mark>{% endif %}.
+          {{ v.effect }}
+        </li>
+        {% endfor %}
+      </ul>
+
+      <!-- The draft with the problem parts highlighted -->
+      <h6>Your {{ content_type }}</h6>
+      <div class="border rounded p-2 mb-3" style="white-space: pre-wrap;">{% for segment in segments %}{% if segment.labels %}<mark title="{{ segment.labels }}">{{ segment.text }}</mark>{% else %}{{ segment.text }}{% endif %}{% endfor %}</div>
+
+      <!-- The moderated version, i.e. what others would see -->
+      <h6>What others would see</h6>
+      <div class="border rounded p-2 mb-2 text-muted" style="white-space: pre-wrap;">{{ moderated_content }}</div>
+      <p class="small mb-4">
+        Risk level: <span class="badge {{ risk_badges[risk_label] }}">{{ risk_label }}</span> ({{ score }})
+      </p>
+
+      <!-- Edit and check again, or post anyway -->
+      <form action="{{ form_action }}" method="POST">
+        <input type="hidden" name="reminder_id" value="{{ reminder_id }}">
+        <label for="review-content" class="form-label"><strong>Edit your {{ content_type }}</strong></label>
+        <textarea class="form-control mb-3" id="review-content" name="content" rows="4" required>{{ content }}</textarea>
+
+        <div class="d-flex flex-wrap gap-2">
+          <button type="submit" name="review_action" value="check" class="btn btn-primary">Check again and post</button>
+          {% if not severe %}
+          <button type="submit" name="review_action" value="post_anyway" class="btn btn-outline-danger">Post anyway</button>
+          {% endif %}
+          <button type="submit" form="cancel-form" class="btn btn-light">Cancel</button>
+        </div>
+      </form>
+
+      <form id="cancel-form" action="{{ url_for('cancel_reminder', reminder_id=reminder_id) }}" method="POST">
+        {% if post_id %}<input type="hidden" name="post_id" value="{{ post_id }}">{% endif %}
+      </form>
+
+      {% if severe %}
+      <p class="small text-muted mt-3 mb-0">Posting anyway isn't possible here: content with severe language or scam phrases is removed completely.</p>
+      {% endif %}
+    </div>
+  </div>
+</div>
+
+{% endblock %}

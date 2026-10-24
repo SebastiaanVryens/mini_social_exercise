@@ -1,0 +1,62 @@
+{# Design Claim 3 feature: tells the author which rules changed their post or comment, and lets
+   them appeal the decision. Only rendered for the author (see get_moderation_notice in app.py). #}
+{% macro moderation_notice(notice) %}
+{% set item = 'post' if notice.content_type == 'post' else 'comment' %}
+{% set modal_id = 'appealModal-' ~ notice.content_type ~ '-' ~ notice.content_id %}
+<div class="alert alert-warning small mt-2 mb-2">
+  <strong>Only you can see this:</strong>
+  {% if notice.appeal and notice.appeal.status == 'approved' %}
+    a moderator approved your appeal, so your {{ item }} is shown as you wrote it.
+  {% else %}
+    your {{ item }} was moderated automatically, following the <a href="/rules">community rules</a>:
+    <ul class="mb-2">
+      {% for v in notice.violations %}
+      <li>{{ v.label }} (Rule {{ v.rule }}){% if v.text %}: <mark>{{ v.text }}</mark>{% endif %}</li>
+      {% endfor %}
+    </ul>
+    {% if not notice.appeal %}
+      Think this is a mistake?
+      <button type="button" class="btn btn-sm btn-warning ms-1" data-bs-toggle="modal" data-bs-target="#{{ modal_id }}">Appeal this decision</button>
+    {% elif notice.appeal.status == 'pending' %}
+      <span class="badge text-bg-secondary">Appeal pending</span> A moderator will review your appeal.
+    {% else %}
+      <span class="badge text-bg-danger">Appeal rejected</span> The moderator explained: "{{ notice.appeal.admin_note }}"
+    {% endif %}
+  {% endif %}
+</div>
+
+{% if not notice.appeal %}
+<div class="modal fade" id="{{ modal_id }}" tabindex="-1" aria-labelledby="{{ modal_id }}-label" aria-hidden="true">
+  <div class="modal-dialog">
+    <div class="modal-content">
+      <div class="modal-header">
+        <h5 class="modal-title" id="{{ modal_id }}-label">Appeal the moderation of your {{ item }}</h5>
+        <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+      </div>
+      <div class="modal-body">
+        <p class="small text-muted">
+          A moderator will read your explanation and decide whether your {{ item }} can be shown as you wrote it.
+          You can appeal each decision once.
+        </p>
+        <form action="{{ url_for('create_appeal') }}" method="POST">
+          <input type="hidden" name="content_type" value="{{ notice.content_type }}">
+          <input type="hidden" name="content_id" value="{{ notice.content_id }}">
+          <label for="{{ modal_id }}-reason" class="form-label">Why should this be allowed?</label>
+          <textarea class="form-control mb-3" id="{{ modal_id }}-reason" name="reason" rows="3" minlength="10" required
+                    placeholder="For example: the link goes to the official Python website, it isn't spam."></textarea>
+          <button type="submit" class="btn btn-primary">Send appeal</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+{% endif %}
+{% endmacro %}
+
+
+{# Shown to everyone on content that a moderator restored after an appeal #}
+{% macro restored_label(content_type, content_id) %}
+{% if appeal_status(content_type, content_id) == 'approved' %}
+<span class="badge text-bg-light border" title="A moderator reviewed this after an appeal">Restored after appeal</span>
+{% endif %}
+{% endmacro %}

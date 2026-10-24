@@ -2,6 +2,7 @@
 {% block content %}
 {% from "macros/user_macros.html.j2" import user_display %}
 {% from "macros/people_macros.html.j2" import suggestion_row %}
+{% from "macros/moderation_macros.html.j2" import restored_label %}
 
 <div class="align-center text-center">
   <img src="{{ url_for('static', filename='icon.png') }}" alt="Logo" style="height: 64px;" class="mb-4">
@@ -96,7 +97,11 @@
         {% endif %}
       </div>
       
-      <p class="mt-2">{{ entry.post.content }}</p>
+      <p class="mt-2">{{ entry.post.content }} {{ restored_label('post', entry.post.id) }}</p>
+      <!-- Only the author sees this label on their moderated post, it links to the notice and appeal (Design Claim 3) -->
+      {% if entry.post.moderated_for_author %}
+      <a href="/posts/{{ entry.post.id }}#appeal" class="badge text-bg-warning text-decoration-none mb-2">Your post was moderated · see why</a>
+      {% endif %}
 
       <!-- Reactions Display and Add Reaction Button -->
       <div class="d-flex align-items-center mt-2 mb-2">
@@ -159,7 +164,7 @@
           <div class="d-flex justify-content-between">
             <div>
               <strong><a href="/u/{{ comment.username }}">{{ user_display(comment.username) }}</a></strong>
-              <p class="mb-0">{{ comment.content }}</p>
+              <p class="mb-0">{{ comment.content }} {{ restored_label('comment', comment.id) }}</p>
             </div>
             
             {% if session.get('user_id') == comment.user_id or session.get('user_id') == entry.post.user_id %}

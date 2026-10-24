@@ -33,6 +33,25 @@
             Comments
         </button>
     </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link {% if current_tab == 'reminders' %}active{% endif %}"
+                id="reminders-tab" data-bs-toggle="tab" data-bs-target="#reminders"
+                type="button" role="tab" aria-controls="reminders"
+                aria-selected="{% if current_tab == 'reminders' %}true{% else %}false{% endif %}"
+                onclick="window.location.href = '{{ url_for('admin_dashboard', tab='reminders') }}'">
+            Reminders
+        </button>
+    </li>
+    <li class="nav-item" role="presentation">
+        <button class="nav-link {% if current_tab == 'appeals' %}active{% endif %}"
+                id="appeals-tab" data-bs-toggle="tab" data-bs-target="#appeals"
+                type="button" role="tab" aria-controls="appeals"
+                aria-selected="{% if current_tab == 'appeals' %}true{% else %}false{% endif %}"
+                onclick="window.location.href = '{{ url_for('admin_dashboard', tab='appeals') }}'">
+            Appeals
+            {% if appeals_pending %}<span class="badge rounded-pill text-bg-danger">{{ appeals_pending }}</span>{% endif %}
+        </button>
+    </li>
 </ul>
 
 <!-- Tab Content -->
@@ -210,6 +229,166 @@
               class="btn btn-primary {% if not comments_has_next %}btn-light disabled{% endif %}">
               Next &raquo;
             </a>
+        </div>
+    </div>
+
+    <!-- Reminders Tab: results of the "check before posting" feature (Design Claim 20) -->
+    <div class="tab-pane fade {% if current_tab == 'reminders' %}show active{% endif %}" id="reminders" role="tabpanel" aria-labelledby="reminders-tab">
+        <p class="text-muted">
+            Members who submit a post or comment that breaks the rules get a reminder before it is published.
+            This shows what they did next.
+        </p>
+
+        <div class="row g-3 mb-4">
+            <div class="col-6 col-lg-3">
+                <div class="card h-100"><div class="card-body">
+                    <div class="text-muted small">Reminders shown</div>
+                    <div class="fs-3 fw-bold">{{ reminder_stats.total }}</div>
+                </div></div>
+            </div>
+            <div class="col-6 col-lg-3">
+                <div class="card h-100"><div class="card-body">
+                    <div class="text-muted small">Fixed before posting</div>
+                    <div class="fs-3 fw-bold text-success">{{ reminder_stats.fixed_percent }}%</div>
+                    <div class="small text-muted">{{ reminder_stats.fixed }} times</div>
+                </div></div>
+            </div>
+            <div class="col-6 col-lg-3">
+                <div class="card h-100"><div class="card-body">
+                    <div class="text-muted small">Cancelled</div>
+                    <div class="fs-3 fw-bold">{{ reminder_stats.cancelled_percent }}%</div>
+                    <div class="small text-muted">{{ reminder_stats.cancelled }} times</div>
+                </div></div>
+            </div>
+            <div class="col-6 col-lg-3">
+                <div class="card h-100"><div class="card-body">
+                    <div class="text-muted small">Posted anyway</div>
+                    <div class="fs-3 fw-bold text-danger">{{ reminder_stats.posted_anyway_percent }}%</div>
+                    <div class="small text-muted">{{ reminder_stats.posted_anyway }} times{% if reminder_stats.pending %}, {{ reminder_stats.pending }} left without a decision{% endif %}</div>
+                </div></div>
+            </div>
+        </div>
+
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th>Author</th>
+                        <th>Type</th>
+                        <th>Original text</th>
+                        <th>Score before</th>
+                        <th>Outcome</th>
+                        <th>Score posted</th>
+                        <th>Created At</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for reminder in recent_reminders %}
+                    <tr>
+                        <td><a href="{{ url_for('user_profile', username=reminder.username) }}">{{ reminder.username }}</a></td>
+                        <td>{{ reminder.content_type }}</td>
+                        <td style="max-width: 400px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{{ reminder.original_content }}">{{ reminder.original_content }}</td>
+                        <td>{{ reminder.original_score }}</td>
+                        <td>
+                            {% if reminder.outcome == 'fixed' %}
+                                <span class="badge bg-success">Fixed</span>
+                            {% elif reminder.outcome == 'cancelled' %}
+                                <span class="badge bg-secondary">Cancelled</span>
+                            {% elif reminder.outcome == 'posted_anyway' %}
+                                <span class="badge bg-danger">Posted anyway</span>
+                            {% else %}
+                                <span class="badge bg-light text-dark border">No decision yet</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ reminder.final_score if reminder.final_score is not none else '-' }}</td>
+                        <td>{{ reminder.created_at|datetimeformat }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="7" class="text-center text-muted">No reminders yet.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+        </div>
+    </div>
+
+    <!-- Appeals Tab: members appeal automatic moderation, the admin decides (Design Claim 3) -->
+    <div class="tab-pane fade {% if current_tab == 'appeals' %}show active{% endif %}" id="appeals" role="tabpanel" aria-labelledby="appeals-tab">
+        <p class="text-muted">
+            Members can appeal when the automatic moderation changed their post or comment.
+            Approving shows the content as it was written; a rejection needs an explanation, which the member will see.
+        </p>
+
+        <h4>Open appeals</h4>
+        {% for appeal in appeals if appeal.status == 'pending' %}
+        <div class="card mb-3 border-warning">
+            <div class="card-body">
+                <div class="d-flex justify-content-between align-items-center mb-2">
+                    <span>
+                        <a href="{{ url_for('user_profile', username=appeal.username) }}">@{{ appeal.username }}</a>
+                        appealed the moderation of their {{ appeal.content_type }}
+                    </span>
+                    <small class="text-muted">
+                        {{ appeal.created_at|datetimeformat }} · <a href="/posts/{{ appeal.post_id }}">view</a>
+                    </small>
+                </div>
+                <p class="mb-1"><strong>Written:</strong> {{ appeal.content }}</p>
+                <p class="mb-1"><strong>Shown after moderation:</strong> {{ appeal.moderated_content }}</p>
+                <p class="mb-1">
+                    <strong>Rules applied:</strong>
+                    {% for v in appeal.violations %}{{ v.label }} (Rule {{ v.rule }}){% if v.text %}: "{{ v.text }}"{% endif %}{% if not loop.last %}, {% endif %}{% endfor %}
+                    · score {{ appeal.score }}
+                </p>
+                <p class="mb-3"><strong>Member's reason:</strong> "{{ appeal.reason }}"</p>
+
+                <form action="{{ url_for('decide_appeal', appeal_id=appeal.id) }}" method="POST">
+                    <label for="appeal-note-{{ appeal.id }}" class="form-label small">Explanation for the member (required when rejecting)</label>
+                    <textarea class="form-control mb-2" id="appeal-note-{{ appeal.id }}" name="note" rows="2"></textarea>
+                    <button type="submit" name="decision" value="approved" class="btn btn-success btn-sm me-2">Approve</button>
+                    <button type="submit" name="decision" value="rejected" class="btn btn-danger btn-sm">Reject</button>
+                </form>
+            </div>
+        </div>
+        {% else %}
+        <p class="text-muted">No open appeals.</p>
+        {% endfor %}
+
+        <!-- Earlier decisions, so similar cases can be decided consistently -->
+        <h4 class="mt-4">Earlier decisions</h4>
+        <div class="table-responsive">
+            <table class="table table-striped table-hover">
+                <thead>
+                    <tr>
+                        <th>Author</th>
+                        <th>Type</th>
+                        <th>Rules applied</th>
+                        <th>Member's reason</th>
+                        <th>Decision</th>
+                        <th>Explanation</th>
+                        <th>Decided At</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for appeal in appeals if appeal.status != 'pending' %}
+                    <tr>
+                        <td><a href="{{ url_for('user_profile', username=appeal.username) }}">{{ appeal.username }}</a></td>
+                        <td><a href="/posts/{{ appeal.post_id }}">{{ appeal.content_type }}</a></td>
+                        <td>{% for v in appeal.violations %}{{ v.label }}{% if not loop.last %}, {% endif %}{% endfor %}</td>
+                        <td style="max-width: 300px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="{{ appeal.reason }}">{{ appeal.reason }}</td>
+                        <td>
+                            {% if appeal.status == 'approved' %}
+                                <span class="badge bg-success">Approved</span>
+                            {% else %}
+                                <span class="badge bg-danger">Rejected</span>
+                            {% endif %}
+                        </td>
+                        <td>{{ appeal.admin_note or '-' }}</td>
+                        <td>{{ appeal.decided_at|datetimeformat }}</td>
+                    </tr>
+                    {% else %}
+                    <tr><td colspan="7" class="text-center text-muted">No decisions yet.</td></tr>
+                    {% endfor %}
+                </tbody>
+            </table>
         </div>
     </div>
 </div>
