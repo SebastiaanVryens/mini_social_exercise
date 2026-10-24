@@ -1199,7 +1199,7 @@ POINTS_PER_COMMENT = 2
 # A single member (e.g. a friend) can't push someone up the levels on their own
 MAX_POINTS_PER_MEMBER = 10
 # TEMPORARY, for testing and screenshots: extra points for every member. Set back to 0 before submitting.
-TEST_BONUS_POINTS = 30
+TEST_BONUS_POINTS = 0
 
 LEVELS = [
     {'level': 1, 'name': 'Newcomer', 'min_points': 0, 'privilege': None},
