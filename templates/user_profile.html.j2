@@ -16,6 +16,10 @@
             <span class="badge rounded-pill text-bg-primary fs-6 align-middle" title="{{ reputation.points }} reputation points">
               Level {{ reputation.level }} · {{ reputation.name }}
             </span>
+            <!-- New members are recognisable during their first weeks (Design Claim 19 feature) -->
+            {% if is_new_member %}
+            <span class="badge rounded-pill text-bg-success fs-6 align-middle">👋 New member</span>
+            {% endif %}
           </h2>
           <p class="card-text text-muted mb-3">
             <strong>Location:</strong> {{ user.location or "N/A" }}<br>
@@ -23,6 +27,11 @@
             <strong>Joined:</strong> {{ user.created_at|datetimeformat }}
           </p>
           <p class="card-text">{{ user.profile or "No profile information provided." }}</p>
+          {% if introduction %}
+          <p class="card-text"><a href="/posts/{{ introduction.post_id }}">👋 Read {{ 'my' if is_own_profile else 'their' }} introduction</a></p>
+          {% elif is_own_profile and is_new_member %}
+          <a href="{{ url_for('introduce') }}" class="btn btn-sm btn-primary mb-2">👋 Introduce yourself</a>
+          {% endif %}
 
          {% if session.user_id and session.user_id != user.id %}
             <div class="my-3">

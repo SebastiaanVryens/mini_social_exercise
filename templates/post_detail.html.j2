@@ -37,6 +37,9 @@
         {% endif %}
       </div>
       
+      {% if is_introduction(post.id) %}
+      <span class="badge text-bg-primary mt-2">👋 New member introduction</span>
+      {% endif %}
       <p class="card-text mt-2">{{ post.content }} {{ restored_label('post', post.id) }}</p>
 
       <!-- Only for the author: which rules changed this post, and the appeal (Design Claim 3) -->

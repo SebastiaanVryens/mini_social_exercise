@@ -202,9 +202,19 @@ def feed():
     if current_user_id and page == 1:
         people_suggestions = get_people_suggestions(current_user_id, SUGGESTIONS_ON_FEED)
 
+    #  Newcomer cards at the top of the first page (Design Claims 18 and 19 features):
+    #  newcomers see their own introduction status, everyone sees new members to welcome
+    newcomer_status = None
+    newcomers_to_welcome = []
+    if current_user_id and page == 1:
+        newcomer_status = get_newcomer_status(current_user_id)
+        newcomers_to_welcome = get_newcomers_to_welcome(current_user_id, WELCOME_CARD_SIZE)
+
     #  4. Render Template with Pagination Info
     return render_template('feed.html.j2',
                            people_suggestions=people_suggestions,
+                           newcomer_status=newcomer_status,
+                           newcomers_to_welcome=newcomers_to_welcome,
                            posts=posts_data, 
                            current_sort=sort,
                            current_show=show,
@@ -279,6 +289,8 @@ def delete_post(post_id):
     db.execute('DELETE FROM reactions WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM ask_requests WHERE post_id = ?', (post_id,))
     db.execute('UPDATE users SET pinned_post_id = NULL WHERE pinned_post_id = ?', (post_id,))
+    # Deleting an introduction post lets the member introduce themselves again
+    db.execute('DELETE FROM introductions WHERE post_id = ?', (post_id,))
     # Finally, delete the post itself
     db.execute('DELETE FROM posts WHERE id = ?', (post_id,))
     db.commit()
@@ -352,6 +364,9 @@ def user_profile(username):
                            pin_level=PIN_LEVEL,
                            avatar_color_level=AVATAR_COLOR_LEVEL,
                            avatar_colors=AVATAR_COLORS,
+                           # New member badge and introduction (Design Claim 19 feature)
+                           is_new_member=is_newcomer(user['created_at']),
+                           introduction=get_introduction(user['id']),
                            points_per_reaction=POINTS_PER_REACTION,
                            points_per_comment=POINTS_PER_COMMENT,
                            max_points_per_member=MAX_POINTS_PER_MEMBER)
@@ -483,9 +498,9 @@ def signup():
             session['user_id'] = new_user_id
             session['username'] = username
 
-            # 3. Flash a welcome message and redirect to the feed.
+            # 3. Flash a welcome message and let the newcomer introduce themselves (Design Claim 19 feature)
             flash(f'Welcome, {username}! Your account has been created.', 'success')
-            return redirect(url_for('feed')) # Redirect to the main feed/dashboard
+            return redirect(url_for('introduce'))
 
         except sqlite3.IntegrityError:
             flash('Username already taken. Please choose another one.', 'danger')
@@ -558,8 +573,12 @@ def add_comment(post_id):
         WHERE post_id = ? AND recipient_id = ? AND status != 'answered'
     ''', (post_id, user_id)).rowcount
     db.commit()
+    # A comment on someone's introduction counts as welcoming them (Design Claim 18 feature)
+    welcomed_username = record_welcome(post_id, user_id)
     if answered:
         flash('Thanks for answering! The member who asked you will see your reply.', 'success')
+    elif welcomed_username:
+        flash(f'Thanks for welcoming @{welcomed_username}! A friendly first contact helps new members stay.', 'success')
     else:
         flash('Your comment was added.', 'success')
 
@@ -844,6 +863,9 @@ def admin_dashboard():
 
     comments.sort(key=lambda x: x['risk_score'], reverse=True) # Sort after fetching and scoring
 
+    # --- Newcomers Tab Data (Design Claims 18 and 19 features) ---
+    newcomers, newcomer_summary = get_newcomer_overview()
+
     # --- Appeals Tab Data (Design Claim 3 feature) ---
     appeals = get_appeals_for_admin()
     appeals_pending = sum(1 for appeal in appeals if appeal['status'] == 'pending')
@@ -891,7 +913,11 @@ def admin_dashboard():
 
                            # Appeals against moderation
                            appeals=appeals,
-                           appeals_pending=appeals_pending)
+                           appeals_pending=appeals_pending,
+
+                           # Newcomers: introductions and welcomes
+                           newcomers=newcomers,
+                           newcomer_summary=newcomer_summary)
 
 
 
@@ -923,6 +949,7 @@ def admin_delete_post(post_id):
     db.execute('DELETE FROM reactions WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM ask_requests WHERE post_id = ?', (post_id,))
     db.execute('UPDATE users SET pinned_post_id = NULL WHERE pinned_post_id = ?', (post_id,))
+    db.execute('DELETE FROM introductions WHERE post_id = ?', (post_id,))
     db.execute('DELETE FROM posts WHERE id = ?', (post_id,))
     db.commit()
     flash(f'Post {post_id} has been deleted.', 'success')
@@ -1965,6 +1992,317 @@ def decide_appeal(appeal_id):
     return redirect(url_for('admin_dashboard', tab='appeals'))
 
 
+# ----- Design Claim features: Introductions and welcomes (Chapter 5, Design Claims 19 and 18)
+# Design Claim 19: "Encouraging newcomers to reveal themselves publicly in profiles or introduction
+# threads gives existing group members a basis for conversation and reciprocation with them and
+# increases interaction between old-timers and newcomers."
+# Design Claim 18: "When newcomers have friendly interactions with existing community members soon
+# after joining a community, they are more likely to stay longer and contribute more."
+# After signing up, newcomers fill in a short guided introduction that is posted to the feed.
+# Existing members see recent introductions on their feed, with the interests they share, and can
+# welcome the newcomer with one click (a comment on the introduction). Newcomers see who welcomed
+# them, and the admin can see whether newcomers got introduced and welcomed, and how fast.
+
+NEWCOMER_DAYS = 14          # Members count as newcomers during their first two weeks
+WELCOME_CARD_SIZE = 3       # Newcomers shown in the "New members to welcome" card
+INTEREST_CHOICES = 16       # Popular hashtags offered as topics on the introduction form
+MAX_INTERESTS = 8
+
+
+def init_newcomer_tables():
+    """Creates the tables for introductions and welcomes, if they don't exist yet."""
+    db = sqlite3.connect(DATABASE)
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS introductions (
+            user_id    INTEGER PRIMARY KEY,
+            post_id    INTEGER NOT NULL,                -- the introduction post in the feed
+            interests  TEXT    NOT NULL DEFAULT '',     -- hashtags without '#', comma-separated
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL
+        )
+    ''')
+    db.execute('''
+        CREATE TABLE IF NOT EXISTS welcomes (
+            newcomer_id INTEGER NOT NULL,
+            member_id   INTEGER NOT NULL,               -- the existing member who welcomed (or skipped)
+            status      TEXT    NOT NULL,               -- welcomed or skipped
+            created_at  TIMESTAMP DEFAULT CURRENT_TIMESTAMP NOT NULL,
+            PRIMARY KEY (newcomer_id, member_id)
+        )
+    ''')
+    db.commit()
+    db.close()
+
+init_newcomer_tables()
+
+
+def to_datetime(value):
+    """Database timestamps come back as datetime or, from aggregates like MIN(), as text."""
+    if isinstance(value, str):
+        return datetime.strptime(value[:19], '%Y-%m-%d %H:%M:%S')
+    return value
+
+
+def is_newcomer(created_at):
+    """Members count as newcomers during their first NEWCOMER_DAYS days."""
+    return (datetime.utcnow() - to_datetime(created_at)).days < NEWCOMER_DAYS
+
+
+def get_introduction(user_id):
+    """The member's introduction, or None. An introduction whose post was deleted doesn't count."""
+    return query_db('''
+        SELECT i.user_id, i.post_id, i.interests, i.created_at
+        FROM introductions i JOIN posts p ON p.id = i.post_id
+        WHERE i.user_id = ?
+    ''', (user_id,), one=True)
+
+
+@app.template_global()
+def is_introduction(post_id):
+    """True for introduction posts, so templates can label them. Loaded once per request."""
+    if 'introduction_post_ids' not in g:
+        rows = query_db('SELECT post_id FROM introductions') or []
+        g.introduction_post_ids = {row['post_id'] for row in rows}
+    return post_id in g.introduction_post_ids
+
+
+def get_popular_hashtags(limit):
+    """The most used hashtags on the platform, offered as topics on the introduction form."""
+    counts = collections.Counter()
+    spelling = {}
+    for row in query_db('SELECT content FROM posts') or []:
+        for tag in re.findall(r'#(\w+)', row['content']):
+            counts[tag.lower()] += 1
+            spelling.setdefault(tag.lower(), tag)  # Keep a readable spelling, e.g. 'NatureLover'
+    return [spelling[tag] for tag, _ in counts.most_common(limit)]
+
+
+def parse_interests(chosen, other_interests):
+    """Turns the chosen topics and the typed interests ('board games, cooking') into hashtags without '#'."""
+    tags = []
+    for item in chosen + (other_interests or '').split(','):
+        item = item.strip().lstrip('#')
+        if ' ' in item:
+            item = item.title()  # 'board games' becomes 'BoardGames'
+        tag = re.sub(r'\W', '', item)
+        if tag and tag.lower() not in {t.lower() for t in tags}:
+            tags.append(tag)
+    return tags[:MAX_INTERESTS]
+
+
+def compose_introduction(location, tags, hope, fun_fact):
+    """Builds the text of the introduction post from the form."""
+    parts = ["👋 Hi everyone, I'm new here!"]
+    if location:
+        parts.append(f"I'm from {location}.")
+    if tags:
+        parts.append("I'm into " + ' '.join('#' + tag for tag in tags) + '.')
+    if hope:
+        parts.append(f'What I hope to find here: {hope}')
+    if fun_fact:
+        parts.append(f'Fun fact about me: {fun_fact}')
+    return ' '.join(parts)
+
+
+@app.route('/introduce', methods=['GET', 'POST'])
+def introduce():
+    """Design Claim 19: a short guided form that lets newcomers introduce themselves to the community."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to introduce yourself.', 'danger')
+        return redirect(url_for('login'))
+
+    existing = get_introduction(user_id)
+    if existing:
+        flash('You already introduced yourself.', 'info')
+        return redirect(url_for('post_detail', post_id=existing['post_id']))
+
+    user = query_db('SELECT location FROM users WHERE id = ?', (user_id,), one=True)
+    form = {
+        'location': (request.form.get('location') if request.method == 'POST' else user['location']) or '',
+        'interests': request.form.getlist('interests'),
+        'other_interests': request.form.get('other_interests', ''),
+        'hope': request.form.get('hope', ''),
+        'fun_fact': request.form.get('fun_fact', ''),
+    }
+
+    if request.method == 'POST':
+        tags = parse_interests(form['interests'], form['other_interests'])
+        hope = form['hope'].strip()
+        if not tags and not hope:
+            # Members need something to start a conversation about (that is the point of Design Claim 19)
+            flash('Pick at least one topic or tell us what you hope to find, so members have something to talk to you about.', 'warning')
+        else:
+            content = compose_introduction(form['location'].strip(), tags, hope, form['fun_fact'].strip())
+            db = get_db()
+            cur = db.execute('INSERT INTO posts (user_id, content) VALUES (?, ?)', (user_id, content))
+            # REPLACE: an older introduction whose post was deleted is overwritten
+            db.execute('INSERT OR REPLACE INTO introductions (user_id, post_id, interests) VALUES (?, ?, ?)',
+                       (user_id, cur.lastrowid, ','.join(tags)))
+            db.commit()
+            flash('Your introduction is posted! Members who share your interests can now welcome you.', 'success')
+            return redirect(url_for('post_detail', post_id=cur.lastrowid))
+
+    return render_template('introduce.html.j2', form=form, topics=get_popular_hashtags(INTEREST_CHOICES))
+
+
+def get_member_terms(user_id):
+    """Words and hashtags from a member's own recent posts, to find what they have in common with newcomers."""
+    terms = set()
+    for row in query_db('SELECT content FROM posts WHERE user_id = ? ORDER BY created_at DESC LIMIT 100', (user_id,)) or []:
+        terms |= extract_keywords(row['content'])
+    return terms
+
+
+def get_newcomers_to_welcome(member_id, limit):
+    """
+    Design Claim 18: recent introductions that the member hasn't welcomed or skipped yet.
+    Newcomers who share interests with the member come first, since that gives them something
+    to talk about (Design Claim 19).
+    """
+    rows = query_db('''
+        SELECT i.user_id, i.post_id, i.interests, i.created_at AS introduced_at,
+               u.username, u.created_at AS joined_at, p.content
+        FROM introductions i
+        JOIN users u ON u.id = i.user_id
+        JOIN posts p ON p.id = i.post_id
+        WHERE i.user_id != ?
+          AND i.user_id NOT IN (SELECT newcomer_id FROM welcomes WHERE member_id = ?)
+          AND u.created_at >= datetime('now', ?)
+        ORDER BY i.created_at DESC
+        LIMIT 50
+    ''', (member_id, member_id, f'-{NEWCOMER_DAYS} days')) or []
+    if not rows:
+        return []
+
+    member_terms = get_member_terms(member_id)
+    newcomers = []
+    for row in rows:
+        newcomer = dict(row)
+        tags = [tag for tag in newcomer['interests'].split(',') if tag]
+        spelling = {'#' + tag.lower(): tag for tag in tags}
+        shared = shared_topics(set(spelling), member_terms)
+        newcomer['shared'] = [spelling[term] for term in spelling if term in shared]
+        newcomer['joined_days_ago'] = (datetime.utcnow() - to_datetime(newcomer['joined_at'])).days
+        newcomer['content'] = moderate_for_display('post', newcomer['post_id'], newcomer['content'])
+        # A friendly opening line the member can edit, based on what they have in common
+        if newcomer['shared']:
+            newcomer['suggested_message'] = (f"Welcome @{newcomer['username']}! I'm also into "
+                                             f"#{newcomer['shared'][0]}. What got you into it?")
+        else:
+            newcomer['suggested_message'] = f"Welcome to Mini Social, @{newcomer['username']}! Great to have you here."
+        newcomers.append(newcomer)
+
+    # Shared interests first, then the most recent introductions (sorted() keeps that order for ties)
+    newcomers.sort(key=lambda n: len(n['shared']), reverse=True)
+    return newcomers[:limit]
+
+
+def get_newcomer_status(user_id):
+    """For a newcomer's own feed: did they introduce themselves yet, and who welcomed them."""
+    user = query_db('SELECT created_at FROM users WHERE id = ?', (user_id,), one=True)
+    if not user or not is_newcomer(user['created_at']):
+        return None
+    introduction = get_introduction(user_id)
+    welcomers = []
+    if introduction:
+        rows = query_db('''
+            SELECT u.username FROM welcomes w JOIN users u ON u.id = w.member_id
+            WHERE w.newcomer_id = ? AND w.status = 'welcomed'
+            ORDER BY w.created_at
+        ''', (user_id,)) or []
+        welcomers = [row['username'] for row in rows]
+    return {'introduction': introduction, 'welcomers': welcomers}
+
+
+def record_welcome(post_id, member_id):
+    """
+    Called when someone comments: a comment on someone else's introduction counts as a welcome.
+    Returns the newcomer's username, or None if the post isn't an introduction.
+    """
+    introduction = query_db('''
+        SELECT i.user_id, u.username FROM introductions i JOIN users u ON u.id = i.user_id
+        WHERE i.post_id = ?
+    ''', (post_id,), one=True)
+    if not introduction or introduction['user_id'] == member_id:
+        return None
+    db = get_db()
+    # Keep the time of the first welcome, also when the member skipped the newcomer earlier
+    db.execute('''
+        INSERT INTO welcomes (newcomer_id, member_id, status) VALUES (?, ?, 'welcomed')
+        ON CONFLICT (newcomer_id, member_id) DO UPDATE SET
+            created_at = CASE WHEN status = 'welcomed' THEN created_at ELSE CURRENT_TIMESTAMP END,
+            status = 'welcomed'
+    ''', (introduction['user_id'], member_id))
+    db.commit()
+    return introduction['username']
+
+
+@app.route('/welcome/<int:newcomer_id>/skip', methods=['POST'])
+def skip_welcome(newcomer_id):
+    """Hides a newcomer from the member's "New members to welcome" card."""
+    user_id = session.get('user_id')
+
+    # Block access if user is not logged in
+    if not user_id:
+        flash('You must be logged in to do this.', 'danger')
+        return redirect(url_for('login'))
+
+    newcomer = query_db('SELECT username FROM users WHERE id = ?', (newcomer_id,), one=True)
+    if newcomer and newcomer_id != user_id:
+        db = get_db()
+        db.execute("INSERT OR IGNORE INTO welcomes (newcomer_id, member_id, status) VALUES (?, ?, 'skipped')",
+                   (newcomer_id, user_id))
+        db.commit()
+        flash(f"OK, we won't show @{newcomer['username']} in your welcome list again.", 'info')
+    return redirect(request.referrer or url_for('feed'))
+
+
+def get_newcomer_overview():
+    """For the admin dashboard: newcomers of the last 30 days, and whether they got introduced and welcomed."""
+    rows = query_db('''
+        SELECT u.id, u.username, u.created_at, i.created_at AS introduced_at, i.post_id,
+               (SELECT COUNT(*) FROM welcomes w WHERE w.newcomer_id = u.id AND w.status = 'welcomed') AS welcome_count,
+               (SELECT MIN(w.created_at) FROM welcomes w WHERE w.newcomer_id = u.id AND w.status = 'welcomed') AS first_welcome_at,
+               (SELECT COUNT(*) FROM posts p WHERE p.user_id = u.id)
+                 + (SELECT COUNT(*) FROM comments c WHERE c.user_id = u.id) AS contributions
+        FROM users u
+        LEFT JOIN introductions i ON i.user_id = u.id
+        WHERE u.created_at >= datetime('now', '-30 days')
+        ORDER BY u.created_at DESC
+    ''') or []
+
+    newcomers = []
+    for row in rows:
+        newcomer = dict(row)
+        newcomer['hours_to_welcome'] = None
+        if newcomer['introduced_at'] and newcomer['first_welcome_at']:
+            delay = to_datetime(newcomer['first_welcome_at']) - to_datetime(newcomer['introduced_at'])
+            newcomer['hours_to_welcome'] = max(round(delay.total_seconds() / 3600, 1), 0)
+        newcomers.append(newcomer)
+
+    introduced = [n for n in newcomers if n['introduced_at']]
+    welcomed = [n for n in introduced if n['welcome_count']]
+    not_welcomed = [n for n in introduced if not n['welcome_count']]
+
+    def average_contributions(group):
+        return round(sum(n['contributions'] for n in group) / len(group), 1) if group else '-'
+
+    def percent(part, whole):
+        return round(100 * len(part) / len(whole)) if whole else 0
+
+    summary = {
+        'total': len(newcomers),
+        'introduced_percent': percent(introduced, newcomers),
+        'welcomed_percent': percent(welcomed, introduced),
+        'welcomed_within_day_percent': percent([n for n in welcomed if n['hours_to_welcome'] <= 24], introduced),
+        'contributions_welcomed': average_contributions(welcomed),
+        'contributions_not_welcomed': average_contributions(not_welcomed),
+    }
+    return newcomers, summary
+
+
 # ----- Functions to be implemented are below
 # Coding Assignment #2
 
@@ -2164,15 +2502,112 @@ def recommend(user_id, filter_following):
     Users: @starboy99, @DancingDolphin, @blogger_bob
     Posts: 1810, 1875, 1880, 2113
     
-    Materials: 
+    Materials:
     - https://www.nvidia.com/en-us/glossary/recommendation-system/
     - http://www.configworks.com/mz/handout_recsys_sac2010.pdf
     - https://www.researchgate.net/publication/227268858_Recommender_Systems_Handbook
+
+    The algorithm is a simple content-based recommender with a social bonus:
+      1. Build an interest profile from the words and hashtags of the posts the user reacted to
+         positively (like, love, laugh, wow). Rare terms count more than common ones (IDF).
+      2. Score every post the user didn't write and hasn't reacted to yet: the more of its terms
+         are in the profile, the higher the score (hashtags count double, like in "Ask someone").
+      3. Add a bonus when the user follows the author, and when the user liked the author's posts before.
+      4. Take the 5 best posts and return them newest first.
+    Users without positive reactions or follows yet (e.g. newcomers) get the most popular posts.
     """
+    if not user_id:
+        return newest_first(get_popular_posts(set(), RECOMMENDATION_COUNT))
 
-    recommended_posts = {} 
+    posts = query_db('''
+        SELECT p.id, p.content, p.created_at, p.user_id, u.username
+        FROM posts p JOIN users u ON u.id = p.user_id
+    ''') or []
+    followed = {row['followed_id'] for row in
+                query_db('SELECT followed_id FROM follows WHERE follower_id = ?', (user_id,)) or []}
+    reactions = query_db('SELECT post_id, reaction_type FROM reactions WHERE user_id = ?', (user_id,)) or []
+    reacted_post_ids = {row['post_id'] for row in reactions}
+    liked_post_ids = {row['post_id'] for row in reactions if row['reaction_type'] in POSITIVE_REACTIONS}
 
-    return recommended_posts;
+    # How many posts contain each term, used to give rare terms more weight
+    terms_by_post = {post['id']: extract_keywords(post['content']) for post in posts}
+    doc_freq = collections.Counter(term for terms in terms_by_post.values() for term in terms)
+
+    # Step 1: the interest profile, and whose posts the user liked
+    profile = collections.Counter()
+    liked_authors = collections.Counter()
+    for post in posts:
+        if post['id'] in liked_post_ids:
+            profile.update(terms_by_post[post['id']])
+            liked_authors[post['user_id']] += 1
+    profile_terms = set(profile)
+
+    # Own posts and posts the user already reacted to are never recommended
+    seen_post_ids = reacted_post_ids | {post['id'] for post in posts if post['user_id'] == user_id}
+
+    # Nothing to base recommendations on yet
+    if not profile and not followed:
+        return newest_first(get_popular_posts(seen_post_ids, RECOMMENDATION_COUNT))
+
+    # Steps 2 and 3: score the candidate posts
+    scored = []
+    for post in posts:
+        if post['id'] in seen_post_ids:
+            continue
+        if filter_following and post['user_id'] not in followed:
+            continue
+        score = 0.0
+        for term in shared_topics(terms_by_post[post['id']], profile_terms):
+            weight = math.log(len(posts) / doc_freq[term]) * profile.get(term, 1)
+            score += weight * (HASHTAG_WEIGHT if term.startswith('#') else 1)
+        if post['user_id'] in followed:
+            score += FOLLOWED_AUTHOR_BONUS
+        score += LIKED_AUTHOR_BONUS * min(liked_authors[post['user_id']], 3)
+        if score > 0:
+            scored.append((score, post))
+
+    # Step 4: the best posts, filled up with popular posts if there are fewer than 5
+    best = sorted(scored, key=lambda item: item[0], reverse=True)[:RECOMMENDATION_COUNT]
+    recommended_posts = [dict(post) for _, post in best]
+    if len(recommended_posts) < RECOMMENDATION_COUNT:
+        exclude = seen_post_ids | {post['id'] for post in recommended_posts}
+        only_authors = followed if filter_following else None
+        recommended_posts += get_popular_posts(exclude, RECOMMENDATION_COUNT - len(recommended_posts), only_authors)
+
+    return newest_first(recommended_posts)
+
+
+# Reactions that count as liking a post
+POSITIVE_REACTIONS = ('like', 'love', 'laugh', 'wow')
+RECOMMENDATION_COUNT = 5
+# Bonus points on top of the topic score
+FOLLOWED_AUTHOR_BONUS = 3.0
+LIKED_AUTHOR_BONUS = 1.5  # Per earlier positive reaction on the author's posts, counted up to 3 times
+
+
+def newest_first(posts):
+    """Recommendations are shown in reverse-chronological order."""
+    return sorted(posts, key=lambda post: post['created_at'], reverse=True)
+
+
+def get_popular_posts(exclude_post_ids, limit, only_authors=None):
+    """The most reacted-to posts, used when there is not enough to base recommendations on."""
+    rows = query_db('''
+        SELECT p.id, p.content, p.created_at, p.user_id, u.username, COUNT(r.id) AS reaction_count
+        FROM posts p
+        JOIN users u ON u.id = p.user_id
+        LEFT JOIN reactions r ON r.post_id = p.id
+        GROUP BY p.id
+        ORDER BY reaction_count DESC, p.created_at DESC
+    ''') or []
+    popular = []
+    for row in rows:
+        if row['id'] in exclude_post_ids or (only_authors is not None and row['user_id'] not in only_authors):
+            continue
+        popular.append(dict(row))
+        if len(popular) == limit:
+            break
+    return popular
 
 if __name__ == '__main__':
     app.run(debug=True, port=8081)
