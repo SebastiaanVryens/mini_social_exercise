@@ -22,7 +22,7 @@
           <div class="d-flex flex-wrap gap-2 mb-2">
             {% for topic in topics %}
             <input type="checkbox" class="btn-check" id="topic-{{ loop.index }}" name="interests" value="{{ topic }}" autocomplete="off" {% if topic in form.interests %}checked{% endif %}>
-            <label class="btn btn-sm btn-outline-primary" for="topic-{{ loop.index }}">#{{ topic }}</label>
+            <label class="btn btn-sm topic-chip" for="topic-{{ loop.index }}">#{{ topic }}</label>
             {% endfor %}
           </div>
           <label for="intro-other" class="form-label small text-muted">…or add your own, separated by commas</label>
