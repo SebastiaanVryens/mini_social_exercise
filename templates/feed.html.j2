@@ -24,6 +24,97 @@
 </div>
 {% endif %}
 
+<!-- Newcomer's own status: introduce yourself, or see who welcomed you (Design Claims 19 and 18) -->
+{% if newcomer_status %}
+<div class="col-md-8 mx-auto mb-4">
+  {% if not newcomer_status.introduction %}
+  <div class="card shadow-sm border-primary">
+    <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <h5 class="card-title mb-1">👋 Welcome to Mini Social!</h5>
+        <p class="mb-0 text-muted">Introduce yourself, so members who share your interests can say hi.</p>
+      </div>
+      <a href="{{ url_for('introduce') }}" class="btn btn-primary">Introduce yourself</a>
+    </div>
+  </div>
+  {% elif newcomer_status.welcomers %}
+  <div class="card shadow-sm border-success">
+    <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <div>
+        <h5 class="card-title mb-1">
+          🎉 {{ newcomer_status.welcomers|length }} {{ 'member' if newcomer_status.welcomers|length == 1 else 'members' }} welcomed you!
+        </h5>
+        <p class="mb-0">{% for name in newcomer_status.welcomers %}{{ user_display(name) }} {% endfor %}</p>
+      </div>
+      <a href="/posts/{{ newcomer_status.introduction.post_id }}" class="btn btn-success">Read their messages</a>
+    </div>
+  </div>
+  {% else %}
+  <div class="card shadow-sm">
+    <div class="card-body d-flex justify-content-between align-items-center flex-wrap gap-2">
+      <p class="mb-0 text-muted">Your introduction is posted. Members who share your interests will see it and can welcome you.</p>
+      <a href="/posts/{{ newcomer_status.introduction.post_id }}" class="btn btn-light btn-sm">View your introduction</a>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endif %}
+
+<!-- "New members to welcome": recent introductions, shared interests first (Design Claim 18) -->
+{% if newcomers_to_welcome %}
+<div class="col-md-8 mx-auto mb-4">
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <h5 class="card-title mb-1">New members to welcome</h5>
+      <p class="small text-muted mb-1">A friendly hello in their first days makes new members more likely to stay.</p>
+
+      {% for newcomer in newcomers_to_welcome %}
+      <div class="py-2 border-bottom">
+        <div class="d-flex justify-content-between align-items-center">
+          <div>
+            {{ user_display(newcomer.username) }}
+            <span class="small text-muted ms-1">
+              joined {{ 'today' if newcomer.joined_days_ago == 0 else newcomer.joined_days_ago ~ (' day ago' if newcomer.joined_days_ago == 1 else ' days ago') }}
+            </span>
+            {% if newcomer.shared %}
+            <span class="badge text-bg-success ms-1">You both like {% for tag in newcomer.shared[:2] %}#{{ tag }}{% if not loop.last %}, {% endif %}{% endfor %}</span>
+            {% endif %}
+          </div>
+          <div class="d-flex flex-shrink-0 ms-2">
+            <button type="button" class="btn btn-primary btn-sm me-2" data-bs-toggle="modal" data-bs-target="#welcomeModal-{{ newcomer.user_id }}">Say welcome</button>
+            <form action="{{ url_for('skip_welcome', newcomer_id=newcomer.user_id) }}" method="POST">
+              <button type="submit" class="btn btn-light btn-sm">Skip</button>
+            </form>
+          </div>
+        </div>
+        <p class="small mb-0 mt-1">{{ newcomer.content|truncate(150) }}</p>
+      </div>
+
+      <!-- The welcome is a comment on the introduction, with a friendly message the member can edit -->
+      <div class="modal fade" id="welcomeModal-{{ newcomer.user_id }}" tabindex="-1" aria-labelledby="welcomeModalLabel-{{ newcomer.user_id }}" aria-hidden="true">
+        <div class="modal-dialog">
+          <div class="modal-content">
+            <div class="modal-header">
+              <h5 class="modal-title" id="welcomeModalLabel-{{ newcomer.user_id }}">Welcome @{{ newcomer.username }}</h5>
+              <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+              <p class="small text-muted">Your message is posted as a comment on their introduction. Feel free to change it.</p>
+              <form action="/posts/{{ newcomer.post_id }}/comment" method="POST">
+                <label for="welcome-content-{{ newcomer.user_id }}" class="form-label">Your welcome message</label>
+                <textarea class="form-control mb-3" id="welcome-content-{{ newcomer.user_id }}" name="content" rows="3" required>{{ newcomer.suggested_message }}</textarea>
+                <button type="submit" class="btn btn-primary">Send welcome</button>
+              </form>
+            </div>
+          </div>
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</div>
+{% endif %}
+
 <!-- "People you may know": friends of friends the user can follow -->
 {% if people_suggestions and people_suggestions.people %}
 <div class="col-md-8 mx-auto mb-4">
@@ -97,6 +188,9 @@
         {% endif %}
       </div>
       
+      {% if is_introduction(entry.post.id) %}
+      <span class="badge text-bg-primary mt-2">👋 New member introduction</span>
+      {% endif %}
       <p class="mt-2">{{ entry.post.content }} {{ restored_label('post', entry.post.id) }}</p>
       <!-- Only the author sees this label on their moderated post, it links to the notice and appeal (Design Claim 3) -->
       {% if entry.post.moderated_for_author %}

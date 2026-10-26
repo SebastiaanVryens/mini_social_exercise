@@ -1,0 +1,51 @@
+{% extends "base.html.j2" %}
+{% block content %}
+
+{# Design Claim 19 feature: a short guided form for newcomers; the introduction is posted to the feed #}
+<div class="col-md-8 mx-auto pt-4">
+  <div class="card shadow-sm">
+    <div class="card-body">
+      <h2 class="card-title">👋 Introduce yourself</h2>
+      <p class="text-muted">
+        Tell the community a bit about yourself. Your introduction is posted to the feed, and members
+        who share your interests will see it and can welcome you.
+      </p>
+
+      <form action="{{ url_for('introduce') }}" method="POST">
+        <div class="mb-3">
+          <label for="intro-location" class="form-label"><strong>Where are you from?</strong></label>
+          <input type="text" class="form-control" id="intro-location" name="location" value="{{ form.location }}" placeholder="For example: Oulu, Finland">
+        </div>
+
+        <div class="mb-3">
+          <p class="mb-2"><strong>What are you into?</strong> Pick some of the popular topics on Mini Social…</p>
+          <div class="d-flex flex-wrap gap-2 mb-2">
+            {% for topic in topics %}
+            <input type="checkbox" class="btn-check" id="topic-{{ loop.index }}" name="interests" value="{{ topic }}" autocomplete="off" {% if topic in form.interests %}checked{% endif %}>
+            <label class="btn btn-sm topic-chip" for="topic-{{ loop.index }}">#{{ topic }}</label>
+            {% endfor %}
+          </div>
+          <label for="intro-other" class="form-label small text-muted">…or add your own, separated by commas</label>
+          <input type="text" class="form-control" id="intro-other" name="other_interests" value="{{ form.other_interests }}" placeholder="For example: board games, ice hockey">
+        </div>
+
+        <div class="mb-3">
+          <label for="intro-hope" class="form-label"><strong>What do you hope to find here?</strong></label>
+          <textarea class="form-control" id="intro-hope" name="hope" rows="2" placeholder="For example: people to share DIY projects with">{{ form.hope }}</textarea>
+        </div>
+
+        <div class="mb-4">
+          <label for="intro-fact" class="form-label"><strong>A fun fact about you</strong> <span class="text-muted">(optional)</span></label>
+          <input type="text" class="form-control" id="intro-fact" name="fun_fact" value="{{ form.fun_fact }}">
+        </div>
+
+        <div class="d-flex gap-2">
+          <button type="submit" class="btn btn-primary">Post my introduction</button>
+          <a href="{{ url_for('feed') }}" class="btn btn-light">Skip for now</a>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+{% endblock %}
